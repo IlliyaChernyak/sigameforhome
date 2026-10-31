@@ -113,13 +113,13 @@ export function registerSocketHandlers(io: Server, room: Room, limits: SocketLim
             throw new Error('Session is no longer active');
           }
           if (access === 'moderator' && !room.canModerate(pid)) throw new Error('Only the host can do that');
-          if (access === 'manager' && !room.canManage(pid)) throw new Error('Only the host or owner can do that');
+          if (access === 'manager' && !room.canManage(pid)) throw new Error('Only the host can do that');
           const result = await handler((payload ?? ({} as TPayload)), pid ?? '');
-          // Ignored repeat buzzes do not alter state and should not trigger room-wide snapshots.
+          // Ignored repeat buzzes and quiet commands (drafts) do not alter shared state, so no room-wide snapshot.
           if (event.startsWith('game:') &&
+              !(result as { quiet?: boolean } | null)?.quiet &&
               !(event === 'game:buzz' && (result as { result?: string } | null)?.result === 'ignored') &&
-              !(event === 'game:contentFinished' && (result as { advanced?: boolean } | null)?.advanced === false) &&
-              !(event === 'game:questionReady' && (result as { ready?: boolean } | null)?.ready === false)) room.changed();
+              !(event === 'game:contentFinished' && (result as { advanced?: boolean } | null)?.advanced === false)) room.changed();
           reply({ ok: true, ...(typeof result === 'object' && result !== null ? result : {}) });
         } catch (err) {
           reply({ ok: false, error: (err as Error).message });
@@ -137,14 +137,11 @@ export function registerSocketHandlers(io: Server, room: Room, limits: SocketLim
 
     /* ---- clock sync ---- */
 
-    on<{ rttMs?: number }>('clock:ping', 'none', (payload) => {
-      if (socket.data.pid && payload?.rttMs !== undefined) {
-        room.recordPing(socket.data.pid as string, payload.rttMs);
-      }
-      return {
-        serverTime: Date.now(),
-        maxPingMs: room.maxConnectedPingMs(),
-      };
+    // Probes carry the client's smoothed round trip; a joined player's figure sizes the buzzer
+    // open lead and comparison window (buzzTiming.ts). Unjoined or stale sockets only get the time.
+    on<{ rtt?: unknown }>('clock:ping', 'none', ({ rtt }, pid) => {
+      if (pid && room.participants.get(pid)?.socketId === socket.id) room.recordPing(pid, rtt);
+      return { serverTime: Date.now() };
     });
 
     /* ---- session ---- */
@@ -178,7 +175,13 @@ export function registerSocketHandlers(io: Server, room: Room, limits: SocketLim
     on<{ targetId?: string; role: Role }>('role:set', 'member', ({ targetId, role }, pid) =>
       room.setRole(pid, targetId ?? pid, role),
     );
+    on<{ ready: boolean }>('player:ready', 'member', ({ ready }, pid) => room.setReady(pid, requireBoolean(ready)));
     on<{ targetId: string }>('participant:kick', 'moderator', ({ targetId }, pid) => room.kick(pid, targetId));
+    // The newcomer's socket now speaks for the old seat; Room.giveSeat already broadcast the change.
+    on<{ seatId: string; newcomerId: string }>('seat:give', 'moderator', ({ seatId, newcomerId }, pid) => {
+      const moved = io.sockets.sockets.get(room.giveSeat(pid, String(seatId), String(newcomerId)));
+      if (moved) moved.data.pid = String(seatId);
+    });
     on<{ targetId?: string; name: string }>('participant:rename', 'member', ({ targetId, name }, pid) =>
       renameParticipant(room, pid, targetId ?? pid, name));
     on<{ targetId: string; delta: number }>('score:adjust', 'moderator', ({ targetId, delta }, pid) =>
@@ -241,21 +244,29 @@ export function registerSocketHandlers(io: Server, room: Room, limits: SocketLim
     on<{ answer: string }>('game:answer', 'member', ({ answer }, pid) =>
       room.engine.submitAnswer(pid, answer));
     on('game:closeForAll', 'moderator', () => room.engine.closeForAllAnswers());
-    on<{ playerId: string; correct: boolean }>('game:judgeForAll', 'moderator', ({ playerId, correct }) =>
-      room.engine.judgeForAll(playerId, requireBoolean(correct)));
+    on<{ playerId: string; correct: boolean }>('game:judgeForAll', 'moderator', ({ playerId, correct }, pid) => {
+      room.assertNotOwnRuling(pid, playerId);
+      room.engine.judgeForAll(playerId, requireBoolean(correct));
+    });
     on<{ amount: number }>('game:finalWager', 'member', ({ amount }, pid) =>
       room.engine.setFinalWager(pid, Number(amount)));
     on<{ answer: string }>('game:finalAnswer', 'member', ({ answer }, pid) =>
       room.engine.submitFinalAnswer(pid, answer));
+    // Drafts change nothing anyone sees, so they must not fan out a room snapshot per keystroke pause.
+    // The exception: a finalist starts or stops changing a sent answer (the host sees who holds
+    // the close), or dropping that change closes the final.
+    on<{ text: string }>('game:draft', 'member', ({ text }, pid) =>
+      (room.engine.saveDraft(pid, text) ? {} : { quiet: true }));
     on('game:openFinal', 'moderator', () => room.engine.openFinal());
     on('game:closeFinal', 'moderator', () => room.engine.closeFinal());
-    on<{ playerId: string; correct: boolean }>('game:judgeFinal', 'moderator', ({ playerId, correct }) =>
-      room.engine.judgeFinal(playerId, requireBoolean(correct)));
+    on<{ playerId: string; correct: boolean }>('game:judgeFinal', 'moderator', ({ playerId, correct }, pid) => {
+      room.assertNotOwnRuling(pid, playerId);
+      room.engine.judgeFinal(playerId, requireBoolean(correct));
+    });
     on('game:openBuzzer', 'moderator', () => room.engine.openBuzzer());
-    on<{ presentationId: string }>('game:contentFinished', 'moderator', ({ presentationId }) =>
-      room.engine.contentFinished(presentationId));
-    on<{ presentationId: string }>('game:questionReady', 'member', ({ presentationId }, pid) =>
-      room.engine.markQuestionReady(pid, String(presentationId ?? '')));
+    // The host's device reports the end of the question's clips, or of the answer's (part: 'answer').
+    on<{ presentationId: string; part?: string }>('game:contentFinished', 'moderator', ({ presentationId, part }) =>
+      part === 'answer' ? room.engine.answerFinished(presentationId) : room.engine.contentFinished(presentationId));
     on<{ clientAt?: number }>('game:buzz', 'member', (payload, pid) => {
       const buzzer = room.engine.buzzer;
       // Once this player's press is pending, penalized, or spent, repeats cannot improve it.
@@ -263,17 +274,35 @@ export function registerSocketHandlers(io: Server, room: Room, limits: SocketLim
           buzzer.pending.some((press) => press.playerId === pid)) return { result: 'ignored' };
       return room.engine.buzz(pid, payload);
     });
-    on<{ correct: boolean; factor?: number }>('game:judge', 'moderator', ({ correct, factor }) =>
-      room.engine.judge(requireBoolean(correct), factor === undefined ? 1 : Number(factor)));
+    // Host only: players have no Pass of their own; the host passes when the answerer says so.
+    // A stand-in host who is answering cannot rule on it (see Room.assertNotOwnRuling).
+    on('game:passAnswer', 'moderator', (_, pid) => {
+      room.assertNotOwnRuling(pid, room.currentAnswererId());
+      room.engine.passAnswer();
+    });
+    on<{ correct: boolean; factor?: number }>('game:judge', 'moderator', ({ correct, factor }, pid) => {
+      room.assertNotOwnRuling(pid, room.currentAnswererId());
+      room.engine.judge(requireBoolean(correct), factor === undefined ? 1 : Number(factor));
+    });
     on<{ presentationId: string; judgmentId: number }>('game:undoJudgment', 'moderator',
-      ({ presentationId, judgmentId }) => room.engine.undoJudgment(presentationId, judgmentId));
+      ({ presentationId, judgmentId }, pid) => {
+        room.assertNotOwnRuling(pid, room.engine.current?.judgments.at(-1)?.playerId);
+        return room.engine.undoJudgment(presentationId, judgmentId);
+      });
     on<{ judgmentId: number }>('game:appealRequest', 'member', ({ judgmentId }, pid) =>
       room.engine.requestAppeal(pid, judgmentId));
     on<{ support: boolean }>('game:appealVote', 'member', ({ support }, pid) =>
       room.engine.voteAppeal(pid, requireBoolean(support)));
     on('game:appealClose', 'moderator', () => room.engine.resolveAppeal());
-    on('game:reveal', 'moderator', () => room.engine.revealAnswer());
-    on('game:next', 'moderator', () => room.engine.next());
+    // Ending the question mid-answer would let a stand-in answerer escape a miss.
+    on('game:reveal', 'moderator', (_, pid) => {
+      room.assertNotOwnRuling(pid, room.currentAnswererId());
+      room.engine.revealAnswer();
+    });
+    on('game:next', 'moderator', (_, pid) => {
+      room.assertNotOwnRuling(pid, room.currentAnswererId());
+      room.engine.next();
+    });
     on('game:prevRound', 'moderator', () => room.engine.prevRound());
     on('game:nextRound', 'moderator', () => room.engine.nextRound());
 

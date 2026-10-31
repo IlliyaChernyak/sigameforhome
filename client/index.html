@@ -21,6 +21,11 @@
           <button type="submit" class="primary">Join the game</button>
         </form>
         <p class="error" id="join-error" role="alert"></p>
+        <!-- Each language names itself, so the switch reads right whichever one is on. -->
+        <div class="lang-switch" role="group" aria-label="Language">
+          <button type="button" class="quiet small" data-lang="en" lang="en">English</button>
+          <button type="button" class="quiet small" data-lang="uk" lang="uk">Українська</button>
+        </div>
       </div>
     </section>
 
@@ -72,6 +77,11 @@
             <output id="volume-value" for="volume-range"></output>
             <!-- Only for phones on the LAN address, where the browser has no native wake lock (QOL-1). -->
             <label id="keep-awake" class="keep-awake" hidden><input type="checkbox" id="pref-keepAwake" /> Keep screen on</label>
+            <!-- Device preferences live here, so the language can change mid-game too (the page reloads and resumes). -->
+            <span class="lang-switch" role="group" aria-label="Language">
+              <button type="button" class="quiet small" data-lang="en" lang="en">English</button>
+              <button type="button" class="quiet small" data-lang="uk" lang="uk">Українська</button>
+            </span>
           </span>
         </span>
         <!-- TV, projector and host screens can fill the display (QOL-4). -->
@@ -174,14 +184,17 @@
             <details class="lobby-details">
               <summary>Timers</summary>
               <div class="settings-grid">
-                <label class="field"><span>Pick reveal</span><span class="unit-input"><input type="number" id="set-timeForQuestionIntro" min="0" max="5" /><em>sec</em></span></label>
-                <label class="field"><span>Reading speed</span><span class="unit-input"><input type="number" id="set-readingSpeed" min="1" max="100" /><em>chars/s</em></span></label>
-                <label class="field"><span>Time to buzz</span><span class="unit-input"><input type="number" id="set-timeForThinkingOnQuestion" min="1" max="120" /><em>sec</em></span></label>
-                <label class="field"><span>Time to answer</span><span class="unit-input"><input type="number" id="set-timeForPrintingAnswer" min="1" max="300" /><em>sec</em></span></label>
-                <label class="field"><span>Time to bid</span><span class="unit-input"><input type="number" id="set-timeForMakingStake" min="1" max="300" /><em>sec</em></span></label>
-                <label class="field"><span>Special answer</span><span class="unit-input"><input type="number" id="set-timeForThinkingOnSpecial" min="1" max="300" /><em>sec</em></span></label>
-                <label class="field"><span>Final answer</span><span class="unit-input"><input type="number" id="set-timeForFinalThinking" min="1" max="300" /><em>sec</em></span></label>
-                <label class="field wide"><span>Round length (0 = no limit)</span><span class="unit-input"><input type="number" id="set-timeOfRound" min="0" max="7200" /><em>sec</em></span></label>
+                <!-- The pick clocks only inform; they were fixed at 30 s until the host could set them (playtest F15). -->
+                <label class="field"><span>Time to pick</span><span class="unit-input"><input type="number" id="set-timeForChoosingQuestion" min="5" max="120" /><em>sec</em></span></label>
+                <label class="field"><span>Final theme pick</span><span class="unit-input"><input type="number" id="set-timeForChoosingFinalTheme" min="5" max="120" /><em>sec</em></span></label>
+                <label class="field"><span>Pick reveal</span><span class="unit-input"><input type="number" id="set-timeForQuestionIntro" min="0" max="10" /><em>sec</em></span></label>
+                <label class="field"><span>Get ready</span><span class="unit-input"><input type="number" id="set-timeForQuestionReady" min="0" max="15" /><em>sec</em></span></label>
+                <label class="field"><span>Reading speed</span><span class="unit-input"><input type="number" id="set-readingSpeed" min="5" max="60" /><em>chars/s</em></span></label>
+                <label class="field"><span>Time to buzz</span><span class="unit-input"><input type="number" id="set-timeForThinkingOnQuestion" min="3" max="30" /><em>sec</em></span></label>
+                <label class="field"><span>Time to answer</span><span class="unit-input"><input type="number" id="set-timeForPrintingAnswer" min="5" max="120" /><em>sec</em></span></label>
+                <label class="field"><span>Time to bid</span><span class="unit-input"><input type="number" id="set-timeForMakingStake" min="5" max="60" /><em>sec</em></span></label>
+                <label class="field"><span>Special answer</span><span class="unit-input"><input type="number" id="set-timeForThinkingOnSpecial" min="10" max="120" /><em>sec</em></span></label>
+                <label class="field"><span>Final answer</span><span class="unit-input"><input type="number" id="set-timeForFinalThinking" min="15" max="180" /><em>sec</em></span></label>
               </div>
             </details>
             <details class="lobby-details">
@@ -222,6 +235,8 @@
         <div id="game-stage">
           <!-- Lobby table: the rules and the invite link sit where questions will appear. -->
           <div id="lobby-table" class="lobby-table hidden">
+            <!-- Players confirm they are ready; the host's start checklist counts them. -->
+            <button id="btn-ready" type="button" class="primary btn-ready hidden" aria-pressed="false">I'm ready</button>
             <h2>Press your button after the frame lights up</h2>
             <p>The host picks a question and reads it. When the table glows green, the first press answers. A wrong answer costs the question's value.</p>
             <div class="invite">
@@ -306,6 +321,9 @@
           <button data-act="judge-half" type="button" class="reward" title="Correct for half the value">½</button>
           <button data-act="judge-double" type="button" class="reward" title="Correct for double the value">×2</button>
           <button data-act="judge-bad" type="button" class="verdict verdict-bad" data-icon="cross" title="Wrong (N)">Wrong</button>
+          <!-- For an answerer who says "pass" out loud: no points lost, the others may still buzz.
+               Only the host passes; players have no Pass button of their own. -->
+          <button data-act="game:passAnswer" type="button" class="quiet" title="The answerer passes: no points lost, others can still buzz">Pass</button>
           <button data-act="game:openBuzzer" id="btn-open-buzzer" type="button" data-icon="zap">Open buzzer now</button>
           <button data-act="game:reveal" type="button" class="quiet" data-icon="eye">Show answer</button>
           <button data-act="game:next" type="button" data-icon="next">Next</button>

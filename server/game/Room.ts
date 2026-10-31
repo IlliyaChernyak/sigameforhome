@@ -13,7 +13,11 @@ import { applySettingsPatch, defaultSettings, type GameSettings } from './settin
 import { takeGraceMode } from './seatGrace.ts';
 import { clearHandover, handoverReady, startHandover } from './moderationHandover.ts';
 import { assertNicknameFree, normalizeNickname } from './nickname.ts';
+import { LatencyBoard } from './buzzTiming.ts';
 import { safeTimeout } from '../utils/safeTimer.ts';
+
+/** Moments with no live answer, wager or bid, where seats may change hands. */
+const CALM_PHASES = new Set<string>([PHASES.LOBBY, PHASES.BOARD, PHASES.ROUND_END, PHASES.FINAL_THEMES, PHASES.GAME_OVER]);
 
 const MAX_MANUAL_SCORE = 1_000_000_000_000;
 export const MAX_ROOM_PARTICIPANTS = 64;
@@ -30,10 +34,8 @@ export interface Participant {
   joinedAt: number;
   autoSpectator?: boolean;
   displayOnly?: boolean;
-  pingMs?: number | null;
-  oneWayMs?: number | null;
-  jitterMs?: number | null;
-  rttSamples?: number[];
+  /** Lobby only: the player said they are ready to start. Cleared by a role change or a game start. */
+  ready?: boolean;
 }
 
 export interface RoomSnapshot {
@@ -54,6 +56,8 @@ export interface RoomSnapshot {
     connected: boolean;
     isOwner: boolean;
     displayOnly: boolean;
+    ready: boolean;
+    /** Live connection figures from clock probes; null while offline or not yet measured. */
     pingMs: number | null;
     oneWayMs: number | null;
     jitterMs: number | null;
@@ -79,6 +83,8 @@ export class Room extends EventEmitter {
   settings: GameSettings = defaultSettings();
   loadedPack: LoadedPack | null = null;
   engine: GameEngine;
+  /** Not persisted: round trips belong to live connections. */
+  latency = new LatencyBoard();
   removalTimers = new Map<string, ReturnType<typeof setTimeout>>();
   changeScheduled = false;
 
@@ -93,8 +99,24 @@ export class Room extends EventEmitter {
     return [...this.participants.values()].filter((p) => p.role === ROLES.PLAYER);
   }
 
+  /** The slowest round trip among seated, connected players; their screens set the buzzer pace. */
+  worstPlayerRttMs(): number | null {
+    return this.latency.worst(this.players().filter((p) => p.connected).map((p) => p.id));
+  }
+
+  /** Records a probe's round trip; the shown ping re-broadcasts only when it moves noticeably. */
+  recordPing(pid: string, rtt: unknown): void {
+    if (this.latency.report(pid, rtt)) this.changed();
+  }
+
   host(): Participant | null {
     return [...this.participants.values()].find((p) => p.role === ROLES.HOST) ?? null;
+  }
+
+  /** No live answer, wager or bid: also true for a pause taken at such a moment. */
+  betweenQuestions(): boolean {
+    const phase = this.engine.phase === PHASES.PAUSED ? this.engine.paused?.phase : this.engine.phase;
+    return !!phase && CALM_PHASES.has(phase);
   }
 
   hasFreePlayerSlot(): boolean {
@@ -111,57 +133,26 @@ export class Room extends EventEmitter {
     return pid === this.ownerId && (!host || (!host.connected && handoverReady(this, host.id)));
   }
 
-  /** Pack/settings management: moderators and the owner. */
+  /**
+   * Pack/settings management (the admin panel). Host only: an owner who sits as a player no longer
+   * gets it. The owner still manages while standing in for a missing host, because canModerate covers that.
+   */
   canManage(pid: string | null | undefined): boolean {
-    return !!pid && !this.participants.get(pid)?.displayOnly &&
-      (pid === this.ownerId || this.canModerate(pid));
+    return this.canModerate(pid);
   }
 
-  /** Records a client's measured RTT sample (ms) and updates its filtered ping, one-way latency, and jitter. */
-  recordPing(pid: string | null | undefined, rawRttMs: unknown): void {
-    if (!pid) return;
-    const p = this.participants.get(pid);
-    if (!p || !p.connected) return;
-    const rtt = Number(rawRttMs);
-    if (!Number.isFinite(rtt) || rtt < 0 || rtt > 5000) return;
-    const sample = Math.round(rtt);
-    p.rttSamples ??= [];
-    p.rttSamples.push(sample);
-    if (p.rttSamples.length > 8) p.rttSamples.shift();
-    const sorted = [...p.rttSamples].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)]!;
-    const mean = sorted.reduce((acc, v) => acc + v, 0) / sorted.length;
-    const mad = sorted.reduce((acc, v) => acc + Math.abs(v - mean), 0) / sorted.length;
-    const prevPing = p.pingMs ?? null;
-    p.pingMs = Math.round(median);
-    p.oneWayMs = Math.round(median / 2);
-    p.jitterMs = Math.round(mad);
-    if (prevPing === null || Math.abs(prevPing - p.pingMs) >= 4) {
-      this.changed();
-    }
+  /**
+   * A player standing in for an absent host must not rule on their own answer or score: they
+   * could mark themselves correct, pass, or end the question to dodge a miss. The host never
+   * answers, so this only ever stops a stand-in. Someone else (the returning host) rules instead.
+   */
+  assertNotOwnRuling(actorId: string, targetId: string | null | undefined): void {
+    if (targetId && targetId === actorId) throw new Error('Someone else must rule on your own answer');
   }
 
-  /** True if at least one connected participant (or player) has reported a live RTT measurement. */
-  hasMeasuredPing(onlyPlayers = false): boolean {
-    for (const p of this.participants.values()) {
-      if (!p.connected) continue;
-      if (onlyPlayers && p.role !== ROLES.PLAYER) continue;
-      if (typeof p.pingMs === 'number' && Number.isFinite(p.pingMs)) return true;
-    }
-    return false;
-  }
-
-  /** Maximum RTT (ms) across all connected participants (or connected players). */
-  maxConnectedPingMs(onlyPlayers = false): number {
-    let maxPing = 0;
-    for (const p of this.participants.values()) {
-      if (!p.connected) continue;
-      if (onlyPlayers && p.role !== ROLES.PLAYER) continue;
-      if (typeof p.pingMs === 'number' && p.pingMs > maxPing) {
-        maxPing = p.pingMs;
-      }
-    }
-    return maxPing;
+  /** Whoever is on the spot right now: the buzzed-in answerer, while they answer. */
+  currentAnswererId(): string | null {
+    return this.engine.phase === PHASES.ANSWERING ? this.engine.buzzer.winnerId : null;
   }
 
   /* ------------------------------------------------------------ sessions */
@@ -217,17 +208,18 @@ export class Room extends EventEmitter {
     if (!p) return null;
     // A new socket must not revive media URLs captured from an earlier connection.
     p.mediaTicket = crypto.randomBytes(24).toString('base64url');
+    this.latency.forget(pid);
     const previous = p.socketId && p.socketId !== socketId ? p.socketId : null;
     p.socketId = socketId;
     p.connected = true;
     this.promoteSpectators();
     if (this.ownerId && !this.participants.get(this.ownerId)?.connected &&
         !this.removalTimers.has(this.ownerId)) this.reassignOwner();
-    const removalTimer = this.removalTimers.get(pid);
-    if (removalTimer) clearTimeout(removalTimer);
+    clearTimeout(this.removalTimers.get(pid));
     this.removalTimers.delete(pid);
     takeGraceMode(this, pid); // a reconnect ends any restore grace; later drops follow live rules
     clearHandover(this, pid);
+    this.engine.resumeAuctionTurn(pid);
     this.changed();
     return previous;
   }
@@ -244,8 +236,8 @@ export class Room extends EventEmitter {
       pid,
       safeTimeout(`reconnect grace ${pid}`, () => this.expire(pid), config.reconnectGraceMs, () => this.changed()),
     );
-    // A disconnected bidder cannot act, so offer the turn to the next player now.
-    if (wasAuctionTurn) this.engine.advanceStakeAuction();
+    // A refresh or app switch must not cost the turn: the engine holds it briefly, then moves on.
+    if (wasAuctionTurn) this.engine.holdAuctionTurn(pid);
     this.engine.advanceForAllAfterRosterChange();
     this.changed();
   }
@@ -342,8 +334,9 @@ export class Room extends EventEmitter {
       throw new Error('Invalid role');
     }
     if (target.role === role) return;
-    if (this.engine.phase !== PHASES.LOBBY && role === ROLES.HOST && target.role === ROLES.PLAYER) {
-      throw new Error('A player cannot become host during a game');
+    // A player leaving their seat mid-question would cut into a live answer, wager or bid.
+    if (role === ROLES.HOST && target.role === ROLES.PLAYER && !this.betweenQuestions()) {
+      throw new Error('Wait until the question is over');
     }
 
     const self = actorId === targetId;
@@ -352,7 +345,9 @@ export class Room extends EventEmitter {
     if (role === ROLES.HOST) {
       const host = this.host();
       if (host && host.id !== targetId) throw new Error('The host seat is taken');
-      if (!moderator && !(self && actorId === this.ownerId)) throw new Error('Only the owner can claim the host seat');
+      // An empty host seat is open to anyone. Only the owner could claim it before, so a host who
+      // pressed Leave came back as a plain player and could not get the seat back.
+      if (!moderator && !self) throw new Error('Only the host can appoint a host');
     } else {
       if (!self && !moderator) throw new Error('You cannot change other participants');
       if (role === ROLES.PLAYER && !moderator && this.settings.lockRoom) throw new Error('The room is locked');
@@ -363,15 +358,60 @@ export class Room extends EventEmitter {
       this.engine.auctionTurnId() === targetId;
     target.role = role;
     delete target.autoSpectator;
+    delete target.ready;
     // A released host seat ends that host's wait; an offline new host starts one, or the owner could
     // never moderate (the seat is kept for the whole game and only a moderator can release it).
     if (role === ROLES.HOST && !target.connected) startHandover(this, targetId);
     else clearHandover(this, targetId);
     this.promoteSpectators();
+    // A player who took the host seat mid-game may have held the next pick.
+    if (this.engine.phase !== PHASES.LOBBY) this.engine.ensureConnectedChooser();
     // A reseated bidder cannot act, so let the next eligible player bid immediately.
     if (wasAuctionTurn && role !== ROLES.PLAYER) this.engine.advanceStakeAuction();
     this.engine.advanceForAllAfterRosterChange();
     this.changed();
+  }
+
+  /** A player marks themselves ready (or not) in the lobby; the host sees it before starting. */
+  setReady(pid: string, ready: boolean): void {
+    const p = this.participants.get(pid);
+    if (p?.role !== ROLES.PLAYER) throw new Error('Only players can mark themselves ready');
+    if (this.engine.phase !== PHASES.LOBBY) throw new Error('The game has already started');
+    p.ready = ready;
+    this.changed();
+  }
+
+  /**
+   * A player lost their device (dead phone, another browser) and rejoined under a new name. The host
+   * gives them their old offline seat back (device playtest F7): the newcomer's session moves into
+   * it, so the seat keeps its id, score and history, and the temporary seat disappears. The lost
+   * device's old token stops working. Between questions only, so no live answer, wager or bid
+   * changes hands. Returns the newcomer's socket id so the caller can rebind it.
+   */
+  giveSeat(actorId: string, seatId: string, newcomerId: string): string {
+    if (!this.canModerate(actorId)) throw new Error('Only the host can give a seat back');
+    const seat = this.participants.get(seatId);
+    const newcomer = this.participants.get(newcomerId);
+    if (!seat || !newcomer || seatId === newcomerId) throw new Error('Unknown participant');
+    if (seat.role !== ROLES.PLAYER) throw new Error('Only a player seat can be given back');
+    if (seat.connected) throw new Error('That seat is still connected');
+    if (newcomer.role === ROLES.HOST || newcomerId === actorId) throw new Error('The host cannot take a player seat');
+    if (!newcomer.connected || !newcomer.socketId) throw new Error('The new device is not connected');
+    if (!this.betweenQuestions()) throw new Error('Wait until the question is over');
+    const engine = this.engine;
+
+    const socketId = newcomer.socketId;
+    clearTimeout(this.removalTimers.get(newcomerId));
+    this.removalTimers.delete(newcomerId);
+    takeGraceMode(this, newcomerId);
+    this.participants.delete(newcomerId);
+    this.tokens.delete(seat.token);
+    seat.token = newcomer.token;
+    this.tokens.set(seat.token, seatId);
+    if (engine.chooserId === newcomerId) engine.chooserId = seatId;
+    if (this.ownerId === newcomerId) this.ownerId = seatId;
+    this.attach(seatId, socketId);
+    return socketId;
   }
 
   kick(actorId: string, targetId: string): void {
@@ -386,7 +426,7 @@ export class Room extends EventEmitter {
   /* ---------------------------------------------------- settings & packs */
 
   updateSettings(actorId: string, patch: Partial<Record<string, unknown>>): void {
-    if (!this.canManage(actorId)) throw new Error('Only the host or owner can change settings');
+    if (!this.canManage(actorId)) throw new Error('Only the host can change settings');
     const next = applySettingsPatch(this.settings, patch);
     // Switching answer input while a question is live would strand the current answerer.
     if (next.oral !== this.settings.oral &&
@@ -407,6 +447,7 @@ export class Room extends EventEmitter {
 
   adjustScore(actorId: string, targetId: string, delta: number): void {
     if (!this.canModerate(actorId)) throw new Error('Only the host can change scores');
+    this.assertNotOwnRuling(actorId, targetId);
     const p = this.participants.get(targetId);
     if (!p) throw new Error('Unknown participant');
     // Leave room for the bounded pack's remaining question values to change the score.
@@ -512,18 +553,22 @@ export class Room extends EventEmitter {
         : null,
       participants: [...this.participants.values()]
         .sort((a, b) => a.joinedAt - b.joinedAt)
-        .map((p) => ({
-          id: p.id,
-          name: p.name,
-          role: p.role,
-          score: p.score,
-          connected: p.connected,
-          isOwner: p.id === this.ownerId,
-          displayOnly: !!p.displayOnly,
-          pingMs: p.pingMs ?? null,
-          oneWayMs: p.oneWayMs ?? null,
-          jitterMs: p.jitterMs ?? null,
-        })),
+        .map((p) => {
+          const ping = p.connected ? this.latency.stats(p.id) : null;
+          return {
+            id: p.id,
+            name: p.name,
+            role: p.role,
+            score: p.score,
+            connected: p.connected,
+            isOwner: p.id === this.ownerId,
+            displayOnly: !!p.displayOnly,
+            ready: !!p.ready,
+            pingMs: ping?.pingMs ?? null,
+            oneWayMs: ping?.oneWayMs ?? null,
+            jitterMs: ping?.jitterMs ?? null,
+          };
+        }),
       settings: this.settings,
       pack: pack && loadedPack ? {
         file: loadedPack.file,

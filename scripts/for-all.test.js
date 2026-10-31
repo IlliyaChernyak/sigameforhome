@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-for-all-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -30,7 +31,7 @@ function game(t) {
   pack.rounds[0].themes[0].questions[0].type = 'forAll';
   pack.rounds[0].themes[0].questions[1].type = 'forAll';
   room.setPack({ ...loaded, pack });
-  room.updateSettings(host.id, { gameMode: 'classic', timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { ...INSTANT_BUZZER, gameMode: 'classic', timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   room.engine.start();
   room.engine.selectQuestion(host.id, true, 0, 0);
   t.after(() => {

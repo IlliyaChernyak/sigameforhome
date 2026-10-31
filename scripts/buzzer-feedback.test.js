@@ -25,6 +25,12 @@ test('each phase has its label', () => {
   assert.equal(phaseLabel(input('board')).tone, 'buzz-idle');
 });
 
+test('open buttons wait for the scheduled green signal on the synced clock', () => {
+  // now is 1000 in input(): the signal at 1300 has not come yet, the one at 900 has.
+  assert.equal(phaseLabel(input('buzzerOpen', { openedAt: 1300 })).main, 'Wait for green');
+  assert.equal(phaseLabel(input('buzzerOpen', { openedAt: 900 })).tone, 'buzz-open');
+});
+
 test('offline disables a visible buzzer', () => {
   const view = buzzerView(phaseLabel(input('buzzerOpen')), false, 'idle');
   assert.equal(view.main, 'Offline');

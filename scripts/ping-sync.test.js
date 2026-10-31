@@ -1,4 +1,9 @@
-/** Ping tracking, synchronized question reveal, and fair buzzer reconciliation tests. */
+/**
+ * Ping telemetry and fair buzzer reconciliation over slow links.
+ *
+ * Merged onto the local buzzer design (buzzTiming.ts): the open lead and comparison window grow
+ * from the slowest player's reported round trip, and the podium shows each link's ping and jitter.
+ */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -31,7 +36,7 @@ function setupGame(t, settings = {}) {
   room.attach(wifiPlayer.id, 'wifi-socket');
 
   room.setPack(structuredClone(loaded));
-  room.updateSettings(host.id, { gameMode: 'simple', timeForQuestionIntro: 0, ...settings });
+  room.updateSettings(host.id, { gameMode: 'simple', timeForQuestionIntro: 0, timeForQuestionReady: 0, ...settings });
   room.engine.start();
 
   t.after(() => {
@@ -51,41 +56,30 @@ test('ping tracking records RTT, one-way latency, jitter, and exposes live telem
   room.recordPing(wifiPlayer.id, 90);
   room.recordPing(wifiPlayer.id, 100);
 
-  assert.equal(room.hasMeasuredPing(), true);
-  assert.equal(room.maxConnectedPingMs(), 90);
-  assert.equal(room.maxConnectedPingMs(true), 90);
+  // The host's link never paces the buzzer; the slowest seated player's latest report does.
+  assert.equal(room.worstPlayerRttMs(), 100);
 
   const snap = room.snapshotFor(host.id);
   const wifiView = snap.participants.find((p) => p.id === wifiPlayer.id);
-  assert.equal(wifiView?.pingMs, 90);
-  assert.equal(wifiView?.oneWayMs, 45);
+  assert.equal(wifiView?.pingMs, 100);
+  assert.equal(wifiView?.oneWayMs, 50);
   assert.ok(typeof wifiView?.jitterMs === 'number' && wifiView.jitterMs > 0);
+  assert.equal(snap.participants.find((p) => p.id === host.id)?.pingMs, 1);
+
+  // An offline seat shows no stale figure.
+  room.detach(wifiPlayer.id, 'wifi-socket');
+  assert.equal(room.snapshotFor(host.id).participants.find((p) => p.id === wifiPlayer.id)?.pingMs, null);
 });
 
-test('synchronized question reveal schedules future revealAt based on max ping and tracks ready ACKs', (t) => {
-  const { room, engine, host, fastPlayer, wifiPlayer } = setupGame(t, { timeForQuestionIntro: 2 });
-
-  room.recordPing(host.id, 1);
-  room.recordPing(fastPlayer.id, 10);
-  room.recordPing(wifiPlayer.id, 120);
-
-  engine.selectQuestion(host.id, true, 0, 0);
-  assert.equal(engine.phase, 'intro');
-  const pid = engine.current.presentationId;
-
-  const r1 = engine.markQuestionReady(fastPlayer.id, pid);
-  assert.equal(r1.ready, true);
-  assert.equal(r1.readyCount, 1);
-
-  const r2 = engine.markQuestionReady(wifiPlayer.id, pid);
-  assert.equal(r2.ready, true);
-  assert.equal(r2.readyCount, 2);
-  assert.deepEqual(room.snapshotFor(host.id).game.current.readyPlayerIds.sort(), [fastPlayer.id, wifiPlayer.id].sort());
-
-  const beforeStart = Date.now();
-  engine.beginQuestion();
-  assert.equal(engine.phase, 'reading');
-  assert.ok(engine.current.revealAt >= beforeStart + 120 + 35, 'revealAt includes maxPing + buffer');
+test('only a noticeable ping change re-broadcasts the room', (t) => {
+  const { room, fastPlayer } = setupGame(t);
+  room.recordPing(fastPlayer.id, 40);
+  let broadcasts = 0;
+  room.changed = () => { broadcasts++; };
+  room.recordPing(fastPlayer.id, 45);
+  assert.equal(broadcasts, 0, 'Wi-Fi noise does not redraw every screen');
+  room.recordPing(fastPlayer.id, 60);
+  assert.equal(broadcasts, 1);
 });
 
 test('fair buzzer reconciliation awards slower-ping player who pressed earlier in synchronized time', async (t) => {
@@ -99,7 +93,7 @@ test('fair buzzer reconciliation awards slower-ping player who pressed earlier i
   engine.openBuzzer();
 
   const openedAt = engine.buzzer.openedAt;
-  assert.ok(openedAt > Date.now(), 'openedAt is scheduled in the future by maxPing + buffer');
+  assert.ok(openedAt > Date.now(), 'openedAt is scheduled in the future by the open lead');
 
   // Wait until openedAt + 85ms so FastLAN's press at openedAt + 80ms is in the past when it arrives
   await delay(Math.max(10, openedAt - Date.now() + 85));
@@ -110,8 +104,8 @@ test('fair buzzer reconciliation awards slower-ping player who pressed earlier i
   await delay(30);
   assert.equal(engine.buzz(wifiPlayer.id, { clientAt: openedAt + 55 }).result, 'queued');
 
-  // Wait for dynamic reconciliation window (maxPing + 25 = 125ms) to resolve
-  await delay(140);
+  // The comparison window is the 200 ms floor here (100 ms round trip / 2 + 80 ms margin is less).
+  await delay(250);
 
   assert.equal(engine.phase, 'answering');
   assert.equal(engine.buzzer.winnerId, wifiPlayer.id, 'SlowWiFi wins because they pressed 25ms earlier');
@@ -167,9 +161,9 @@ test('multi-round test game over simulated network with 500-900ms additional pin
   function createNetworkClient(name, { oneWayMs = 0, jitterMs = 0, clockSkewMs = 0 } = {}) {
     const serverHandlers = new Map();
     const clientHandlers = new Map();
-    const clockSamples = [];
     let clockOffsetMs = 0;
-    let lastMeasuredRttMs = null;
+    let bestRtt = Infinity;
+    let smoothRtt = null;
 
     const sampleOneWay = () => {
       const j = jitterMs > 0 ? Math.round((Math.random() * 2 - 1) * jitterMs) : 0;
@@ -211,10 +205,9 @@ test('multi-round test game over simulated network with 500-900ms additional pin
       socket,
       state: null,
       events: [],
-      revealedQuestions: new Map(), // presentationId -> wallClockMs when client revealed question
       unlockedBuzzers: [],          // wallClockMs when client unlocked buzzer
       get clockOffsetMs() { return clockOffsetMs; },
-      get lastMeasuredRttMs() { return lastMeasuredRttMs; },
+      get smoothRtt() { return smoothRtt; },
       localNow,
       serverNow,
       // Client -> Server emit with ACK (delayed by oneWayMs each way => full RTT)
@@ -231,21 +224,20 @@ test('multi-round test game over simulated network with 500-900ms additional pin
           }, upDelay);
         });
       },
-      // Runs the client clock sync sample algorithm (matching client/src/app.ts)
+      // Runs the client clock sync sample algorithm (matching syncClockSample in client/src/app.ts)
       async syncClockSample() {
         const t0 = localNow();
-        const res = await client.emit('clock:ping', lastMeasuredRttMs !== null ? { rttMs: lastMeasuredRttMs } : {});
+        const res = await client.emit('clock:ping', smoothRtt == null ? {} : { rtt: Math.round(smoothRtt) });
         const t2 = localNow();
-        const rtt = Math.max(0, t2 - t0);
-        if (res && typeof res.serverTime === 'number') {
-          lastMeasuredRttMs = Math.round(rtt);
-          const offset = res.serverTime - (t0 + rtt / 2);
-          clockSamples.push({ rtt, offset });
-          if (clockSamples.length > 8) clockSamples.shift();
-          const sortedByRtt = [...clockSamples].sort((a, b) => a.rtt - b.rtt);
-          const bestCount = Math.max(1, Math.ceil(sortedByRtt.length / 2));
-          const best = sortedByRtt.slice(0, bestCount);
-          clockOffsetMs = Math.round(best.reduce((acc, s) => acc + s.offset, 0) / best.length);
+        if (!res || typeof res.serverTime !== 'number') return;
+        const rtt = t2 - t0;
+        smoothRtt = smoothRtt == null ? rtt : smoothRtt * 0.7 + rtt * 0.3;
+        const sampleOffset = res.serverTime + rtt / 2 - t2;
+        if (rtt <= bestRtt) {
+          bestRtt = rtt;
+          clockOffsetMs = sampleOffset;
+        } else if (rtt <= bestRtt * 1.5 + 10) {
+          clockOffsetMs = clockOffsetMs * 0.8 + sampleOffset * 0.2;
         }
       },
       // Presses the buzzer at a specific wall-clock moment, attaching client's synchronized serverNow()
@@ -257,18 +249,6 @@ test('multi-round test game over simulated network with 500-900ms additional pin
 
     clientHandlers.set('room:state', (snap) => {
       client.state = snap;
-      const c = snap.game?.current;
-      if (c && (snap.game.phase === 'intro' || snap.game.phase === 'reading')) {
-        client.emit('game:questionReady', { presentationId: c.presentationId });
-      }
-      if (c && snap.game.phase === 'reading' && c.revealAt != null && !client.revealedQuestions.has(c.presentationId)) {
-        const waitMs = Math.max(0, c.revealAt - serverNow());
-        setTimeout(() => {
-          if (!client.revealedQuestions.has(c.presentationId)) {
-            client.revealedQuestions.set(c.presentationId, Date.now());
-          }
-        }, waitMs);
-      }
     });
 
     clientHandlers.set('game:event', (evt) => {
@@ -318,7 +298,7 @@ test('multi-round test game over simulated network with 500-900ms additional pin
   assert.ok(Math.abs(fastLan.serverNow() - Date.now()) < 25, `FastLAN synced clock within 25ms (err=${fastLan.serverNow() - Date.now()}ms)`);
   assert.ok(Math.abs(highPing.serverNow() - Date.now()) < 35, `HighPing700ms synced clock within 35ms despite 700ms RTT & -950ms skew (err=${highPing.serverNow() - Date.now()}ms)`);
 
-  const maxPing = room.maxConnectedPingMs(true);
+  const maxPing = room.worstPlayerRttMs();
   assert.ok(maxPing >= 650 && maxPing <= 760, `Server tracked HighPing700ms RTT in 500-900ms range: ${maxPing}ms`);
 
   // Load pack and start game in Simple mode across multiple rounds
@@ -326,6 +306,7 @@ test('multi-round test game over simulated network with 500-900ms additional pin
   await hostClient.emit('settings:update', {
     gameMode: 'simple',
     timeForQuestionIntro: 0,
+    timeForQuestionReady: 0,
     falseStart: true,
   });
   const startRes = await hostClient.emit('game:start');
@@ -336,25 +317,15 @@ test('multi-round test game over simulated network with 500-900ms additional pin
   // --- ROUND 1, QUESTION 1: HighPing700ms buzzes 35ms earlier than FastLAN in synchronized time ---
   const sel1 = await hostClient.emit('game:select', { themeIndex: 0, questionIndex: 0 });
   assert.equal(sel1.ok, true);
-  const q1Id = room.engine.current.presentationId;
   const q1Price = room.engine.current.price;
 
-  // Wait until revealAt has passed so all clients reveal the question
-  await delay(Math.max(50, room.engine.current.revealAt - Date.now() + 80));
-
-  const hostReveal1 = hostClient.revealedQuestions.get(q1Id);
-  const fastReveal1 = fastLan.revealedQuestions.get(q1Id);
-  const hpReveal1 = highPing.revealedQuestions.get(q1Id);
-  assert.ok(hostReveal1 && fastReveal1 && hpReveal1, 'All 3 clients revealed Round 1 Question 1');
-  assert.ok(
-    Math.abs(hpReveal1 - hostReveal1) < 40 && Math.abs(fastReveal1 - hostReveal1) < 40,
-    `Synchronized reveal across 0ms, 10ms, and 700ms clients (spread=${Math.max(hostReveal1, fastReveal1, hpReveal1) - Math.min(hostReveal1, fastReveal1, hpReveal1)}ms)`,
-  );
+  assert.equal(room.engine.phase, 'reading');
 
   // Host opens buzzer for Question 1
   await hostClient.emit('game:openBuzzer');
   const open1At = room.engine.buzzer.openedAt;
-  assert.ok(open1At >= Date.now() + 600, 'Buzzer openedAt accounts for 700ms maxPing + buffer');
+  // The open signal must reach the 350 ms one-way client before its screen is due to turn green.
+  assert.ok(open1At - Date.now() >= 350, `Buzzer openedAt leads the slowest link (${open1At - Date.now()}ms)`);
 
   // Wait until buzzer unlocks simultaneously on all clients
   await delay(Math.max(10, open1At - Date.now() + 25));

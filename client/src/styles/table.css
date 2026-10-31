@@ -76,7 +76,7 @@
   font-variant-numeric: tabular-nums; letter-spacing: -.02em;
 }
 .board button.cell { width: 100%; cursor: pointer; }
-.board button.cell:not(:disabled):hover { background: var(--board-lit); color: var(--lamp-soft); }
+@media (hover: hover) and (pointer: fine) { .board button.cell:not(:disabled):hover { background: var(--board-lit); color: var(--lamp-soft); } }
 .board button.cell:focus-visible { outline: 3px solid var(--paper); outline-offset: -3px; }
 /* Played cells stay on the board, faint but readable, so the grid reads as "played", not holes. */
 .board .cell.used { background: var(--cell-played); color: var(--ghost); }
@@ -136,6 +136,14 @@
 .lobby-table { display: grid; align-content: center; gap: 14px; padding: clamp(20px, 3vw, 40px); border-radius: calc(var(--r-table) - 4px); background: var(--board); text-align: center; }
 .lobby-table h2 { font: 700 clamp(22px, 2.6vw, 38px)/1.2 var(--font-display); text-wrap: balance; }
 .lobby-table > p { max-width: 60ch; margin: 0 auto; color: var(--mist); font-size: var(--t-m); }
+/* The ready toggle sits above the rules so a player sees it first; pressed it turns green. */
+.btn-ready { justify-self: center; min-height: 52px; padding: 12px 32px; font-size: var(--t-m); }
+/* Outranks button.primary and its hover, so the pressed state stays green under the pointer. */
+button.btn-ready[aria-pressed="true"] { background: var(--go); border-color: var(--go); color: var(--on-go); }
+/* button.primary only repaints on hover for fine pointers (base.css), so the override lives in the same media block. */
+@media (hover: hover) and (pointer: fine) {
+  button.btn-ready[aria-pressed="true"]:not(:disabled):hover { background: var(--go); border-color: var(--go); color: var(--on-go); }
+}
 .lobby-table .invite { display: grid; gap: 8px; justify-items: center; margin-top: 6px; }
 .lobby-table .invite > span { color: var(--mist); font-weight: 700; font-size: var(--t-xs); }
 .lobby-table .invite .row { justify-content: center; align-items: center; }
@@ -152,7 +160,7 @@
 .board.final-themes { align-content: stretch; }
 .board.final-themes .theme { justify-content: center; text-align: center; flex-direction: column; gap: 6px; font-size: clamp(15px, 1.8vw, 24px); }
 .board.final-themes button.theme { border: 0; color: var(--paper); }
-.board.final-themes button.theme:hover { background: var(--board-lit); }
+@media (hover: hover) and (pointer: fine) { .board.final-themes button.theme:hover { background: var(--board-lit); } }
 .board.final-themes .theme small { color: var(--stop); font-size: var(--t-xs); font-weight: 800; }
 
 /*
@@ -174,6 +182,27 @@
 }
 #question .q-meta .q-type { display: inline-block; margin-left: 8px; padding: 1px 10px; border-radius: 999px; background: var(--set-sunk); color: var(--paper); font-size: var(--t-xs); vertical-align: 1px; }
 #question p { margin: 0; }
+/* Get-ready strip: the question is already up, this counts down to reading. The ring around the
+   number drains on the server clock (--left, set every frame on #game-stage by frameClock), so every
+   screen ends the countdown together. */
+#question .q-ready {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  margin: 0 auto; padding: 6px 8px 6px 22px; border-radius: 999px;
+  background: var(--lamp); color: var(--on-lamp); font-weight: 800;
+}
+#question .q-ready-label { font-size: clamp(16px, 1.8vw, 26px); letter-spacing: .02em; }
+#question .q-ready-count {
+  position: relative; display: grid; place-items: center; width: 1.75em; aspect-ratio: 1;
+  font-size: clamp(18px, 2.2vw, 30px); line-height: 1; font-variant-numeric: tabular-nums;
+}
+/* Clockwise from the top: the lit part is the time left, the faint track the time spent. */
+#question .q-ready-count::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(var(--on-lamp) calc(var(--left, 1) * 360deg),
+    color-mix(in srgb, var(--on-lamp) 18%, transparent) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3px));
+}
 
 /* The prompt is the headline of the screen: big, pinned at the top, shrunk by script only if it must. */
 .q-prompt {
@@ -230,10 +259,10 @@
 /* Neutral: the host bar already holds the one amber button on screen. */
 .media-tap-btn { background: var(--set-raised); color: var(--paper); border-color: var(--rule-strong); font-weight: 800; }
 
-.audio-cue { flex-direction: column; gap: 14px; min-height: 0; background: transparent; border: 0; color: var(--mist); font-size: var(--t-m); }
-.audio-cue:not(:disabled):hover { background: transparent; color: var(--paper); }
-.audio-cue.playing { cursor: default; pointer-events: none; }
-.audio-cue .bars { display: flex; align-items: flex-end; gap: 8px; height: clamp(48px, 22cqh, 140px); }
+/* A picture of the sound, not a control: still and dim until the clip plays, then the bars move. */
+.audio-cue { display: flex; align-items: center; justify-content: center; min-height: 0; pointer-events: none; }
+.audio-cue .bars { display: flex; align-items: flex-end; gap: 8px; height: clamp(48px, 22cqh, 140px); opacity: .45; transition: opacity .3s; }
+.audio-cue.playing .bars { opacity: 1; }
 .audio-cue .bars i { width: clamp(10px, 1.8cqw, 22px); height: 30%; border-radius: 3px; background: var(--lamp); }
 .audio-cue.playing .bars i { animation: level .9s ease-in-out infinite alternate; }
 .audio-cue.playing .bars i:nth-child(2) { animation-delay: -.3s; }
@@ -269,11 +298,24 @@
 }
 .option b { color: var(--lamp); font: 700 var(--t-m)/1 var(--font-display); }
 .option img { max-height: 44px; border-radius: 4px; }
-button.option:not(:disabled):hover { background: var(--set-raised); border-color: var(--talk); }
+@media (hover: hover) and (pointer: fine) { button.option:not(:disabled):hover { background: var(--set-raised); border-color: var(--talk); } }
 .option.right { background: var(--go-deep); border-color: var(--go); }
 .option.right b { color: var(--go); }
 .option.wrong { border-color: var(--stop); color: var(--mist); text-decoration: line-through; }
 .q-actions { display: flex; justify-content: center; }
+/* Select questions: the picture or clip on the left, the options in a column on the right. */
+.q-split { display: flex; gap: 10px; min-height: 0; }
+#question.has-media .q-split { flex: 1 1 0; }
+#question.has-media .q-split > .q-options {
+  flex: 0 0 clamp(220px, 34%, 420px); display: flex; flex-direction: column; justify-content: center; min-height: 0;
+}
+#question.has-media .q-split .option { flex: 0 1 auto; min-height: 0; font-size: var(--t-s); }
+#question:not(.has-media) .q-split > .q-options { flex: 1 1 auto; }
+/* The options wait for the clip (keeping their place, so nothing jumps), then arrive one by one. */
+.q-options.waiting .option { visibility: hidden; }
+.q-options.arriving .option { animation: option-in .3s ease-out both; animation-delay: calc(var(--i, 0) * var(--step, 300ms)); }
+@keyframes option-in { from { opacity: 0; transform: translateX(24px); } }
+@media (prefers-reduced-motion: reduce) { @keyframes option-in { from { opacity: 0; } } }
 
 /* Reveal: the answer replaces the prompt in the same place, in the "correct" colour. */
 #question.showing-answer { box-shadow: inset 0 0 0 3px var(--go); }
@@ -297,14 +339,25 @@ button.option:not(:disabled):hover { background: var(--set-raised); border-color
   /*
    * A question fits the phone without scrolling: the table takes what is left after the top bar (44),
    * banner (~68), podium row (~65), buzzer or host bar (~96), gaps and page padding (~57).
+   * Portrait only: a 568x320 landscape phone is also this narrow, and landscape.css sizes it instead.
    */
-  #game-stage:has(> #question:not(.hidden)) { height: max(220px, calc(100dvh - 325px)); }
-  /* A wager or answer form on a phone must stay in view next to the question. */
-  #screen-game:has(.dock > .card:not(.hidden)) #game-stage:has(> #question:not(.hidden)) { height: clamp(240px, 44dvh, 420px); }
+  @media (orientation: portrait) {
+    #game-stage:has(> #question:not(.hidden)) { height: max(220px, calc(100dvh - 325px)); }
+    /* A wager or answer form on a phone must stay in view next to the question. */
+    #screen-game:has(.dock > .card:not(.hidden)) #game-stage:has(> #question:not(.hidden)) { height: clamp(240px, 44dvh, 420px); }
+  }
   /* Phones stack each theme over its prices, so four-digit values keep a readable size. */
   .board { container-type: inline-size; grid-template-columns: repeat(var(--phone-cols), minmax(0, 1fr)); grid-auto-rows: auto; gap: 3px; }
   .board .theme { grid-column: 1 / -1; padding: 4px 8px; font-size: 13px; white-space: nowrap; text-overflow: ellipsis; display: block; text-align: left; }
-  .board .cell { min-height: 38px; font-size: clamp(12px, calc(100cqw * .045), 17px); }
+  /*
+   * Cells grow into the free height of tall phones (thumb-sized, up to 72 px) instead of leaving a third
+   * of the screen empty (playtest F13). 250 px is the bar, banner, podium row and gaps; 30 px per theme
+   * label. --phone-cell-rows (set by script) counts the price rows.
+   */
+  .board .cell {
+    min-height: clamp(38px, calc((100dvh - 250px - var(--rows, 3) * 30px) / var(--phone-cell-rows, 3)), 72px);
+    font-size: clamp(12px, calc(100cqw * .045), 17px);
+  }
   .board.final-themes { grid-auto-rows: auto; }
   .board.final-themes .theme { grid-column: auto; min-height: 56px; display: flex; white-space: normal; text-align: center; font-size: var(--t-s); }
   #question { padding: 8px; gap: 6px; }
@@ -312,4 +365,13 @@ button.option:not(:disabled):hover { background: var(--set-raised); border-color
   .q-prompt { font-size: clamp(17px, 5.2vw, 26px); }
   #question:not(.has-media) .q-prompt { font-size: clamp(20px, 6.4vw, 32px); }
   .option { min-height: 44px; font-size: var(--t-s); }
+  /* An upright phone has no room for a side column: the options stack under the picture or clip.
+     A phone on its side keeps the column, which suits its wide, short screen. */
+  @media (orientation: portrait) {
+    .q-split { flex-direction: column; gap: 6px; }
+    /* Two columns keep the clip a usable size; until the options arrive the clip has the whole card. */
+    #question.has-media .q-split > .q-options { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    #question.has-media .q-split .option { min-height: 44px; gap: 8px; padding: 6px 10px; }
+    .q-split > .q-options.waiting { display: none !important; }
+  }
 }

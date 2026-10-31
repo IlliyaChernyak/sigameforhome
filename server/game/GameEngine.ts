@@ -17,6 +17,7 @@ import type { AnswerOption, AnswerType, ContentItem, Package, Question, Question
 import { PHASES, type Phase, ROLES } from './constants.ts';
 import type { Participant, Room } from './Room.ts';
 import type { GameSettings } from './settings.ts';
+import { openLeadMs, syncWindowMs } from './buzzTiming.ts';
 import { safeTimeout } from '../utils/safeTimer.ts';
 
 const CLIENT_CLOCK_TRUST_MS = 500;
@@ -24,7 +25,18 @@ const CLIENT_CLOCK_TRUST_MS = 500;
 /** Host verdict multipliers for a correct answer: half credit, full, or double. */
 const REWARD_FACTORS = [0.5, 1, 2];
 const QUESTION_PHASES = new Set<Phase>([PHASES.READING, PHASES.BUZZER_OPEN, PHASES.ANSWERING, PHASES.FOR_ALL_ANSWERING, PHASES.FOR_ALL_JUDGE, PHASES.REVEAL]);
+/**
+ * The longest the server waits for the host's device to report that a clip ended. A host who
+ * drops, locks their phone, or whose browser blocks playback never reports it, and the room
+ * would sit on the question until someone pressed a button. Pack-given durations close sooner.
+ */
+const CLIP_REPORT_LIMIT_SECONDS = 180;
+/** Slack past a pack-given duration: media delay, buffering, and a slow host device. */
+const CLIP_REPORT_MARGIN_SECONDS = 10;
+const isClip = (item: ContentItem): boolean => item.type === 'audio' || item.type === 'video';
 
+/** How long a dropped bidder keeps their auction turn (device playtest F16). */
+const AUCTION_RECONNECT_GRACE_MS = 10_000;
 export interface ActiveTimer {
   name: string;
   durationMs: number;
@@ -73,10 +85,6 @@ export interface CurrentQuestionState {
   judgments: Judgment[];
   /** Option letters and picture clicks, kept so the reveal can show every attempt. */
   picks: AnswerPick[];
-  /** Synchronized server timestamp (ms) when all clients reveal the question simultaneously. */
-  revealAt: number | null;
-  /** Connected players who have acknowledged preloading the locked question. */
-  readyPlayerIds: Set<string>;
 }
 
 export interface AnswerPick {
@@ -139,7 +147,6 @@ interface PausedState {
   phase: Phase;
   timerName: string | null;
   timerMs: number | null;
-  roundMs: number | null;
   buzzWindowMs?: number | null;
 }
 
@@ -150,7 +157,6 @@ export interface GameView {
   pausedPhase: Phase | null;
   roundIndex: number;
   round: { name: string; type: Round['type'] } | null;
-  roundEndsAt: number | null;
   board: Array<{
     name: string;
     questions: Array<{ price: number; available: boolean }>;
@@ -181,14 +187,12 @@ export interface GameView {
     showmanComments: string | null;
     selectionMode: string | null;
     picks: AnswerPick[];
-    revealAt: number | null;
-    readyPlayerIds: string[];
   } | null;
   undoJudgment: { presentationId: string; judgmentId: number; playerId: string } | null;
   buzzer: {
-    openedAt: number | null;
     winnerId: string | null;
     winnerInfo: WinnerInfo | null;
+    openedAt: number | null;
     attempted: string[];
     blockedUntil: number | null;
     blockedPlayers: Array<{ id: string; until: number }>;
@@ -217,6 +221,7 @@ export interface GameView {
     judged: string[];
     eligibleIds: string[];
     answeredIds: string[];
+    editingIds: string[];
     yourAnswer: string | null;
     answers: Record<string, string> | null;
   } | null;
@@ -240,15 +245,21 @@ export class GameEngine {
   played!: Set<string>;
   chooserId!: string | null;
   current!: CurrentQuestionState | null;
-  roundEndsAt!: number | null;
   timer: ActiveTimer | null = null;
+  /** Hidden from players' clocks: it is not a deadline, only the latest the server will wait. */
+  clipReportHandle?: ReturnType<typeof setTimeout>;
   buzzWindowHandle?: ReturnType<typeof setTimeout>;
   buzzWindowEndsAt: number | null = null;
   buzzer!: BuzzerState;
-  roundTimeout?: ReturnType<typeof setTimeout>;
   finalWagers!: Map<string, number>;
   finalJudged!: Set<string>;
   finalAnswers!: Map<string, string>;
+  /**
+   * Unsent text from the final and for-all answer boxes (device playtest F4). Used only when answer
+   * time closes, so a host who ends it early, a timer, or a dropped phone never loses a typed answer.
+   * Never part of view(): nobody else sees what a player has not sent.
+   */
+  drafts!: Map<string, string>;
   removedFinalThemes!: Set<number>;
   paused!: PausedState | null;
   auction!: StakeAuction | null;
@@ -264,17 +275,15 @@ export class GameEngine {
 
   reset(): void {
     this.clearTimer();
-    if (this.roundTimeout) clearTimeout(this.roundTimeout);
-    this.roundTimeout = undefined;
     this.phase = PHASES.LOBBY;
     this.roundIndex = -1;
     this.played = new Set<string>();
     this.chooserId = null;
     this.current = null;
-    this.roundEndsAt = null;
     this.finalWagers = new Map();
     this.finalJudged = new Set();
     this.finalAnswers = new Map();
+    this.drafts = new Map();
     this.removedFinalThemes = new Set();
     this.paused = null;
     this.auction = null;
@@ -286,8 +295,7 @@ export class GameEngine {
   }
 
   resetBuzzer(): void {
-    if (this.buzzWindowHandle) clearTimeout(this.buzzWindowHandle);
-    this.buzzWindowHandle = undefined;
+    clearTimeout(this.buzzWindowHandle);
     this.buzzWindowEndsAt = null;
     this.buzzer = {
       winnerId: null,
@@ -481,6 +489,36 @@ export class GameEngine {
   clearTimer(): void {
     if (this.timer) clearTimeout(this.timer.handle);
     this.timer = null;
+    // Every step that clears the clock leaves the clip wait too (or re-arms it, see resume).
+    clearTimeout(this.clipReportHandle);
+    this.clipReportHandle = undefined;
+  }
+
+  /**
+   * Safety net for the waits only the host's device can end: question clips (contentFinished)
+   * and answer clips (answerFinished). If no report arrives, the server acts as if it had.
+   */
+  private armClipReportGuard(): void {
+    clearTimeout(this.clipReportHandle);
+    this.clipReportHandle = undefined;
+    const current = this.current;
+    if (!current) return;
+    const { question, presentationId } = current;
+    const reading = this.phase === PHASES.READING && this.readingEndsOnSignal(question);
+    const revealing = this.phase === PHASES.REVEAL && this.round?.type !== 'final' && this.hasAnswerClip(question);
+    if (!reading && !revealing) return;
+    const items = reading ? question.content : question.answerContent;
+    // A clip without a pack-given duration could be a whole song, so only the cap is safe.
+    const seconds = items.filter(isClip).every((item) => item.duration)
+      ? (reading ? this.estimateReadingSeconds(question) : this.estimateRevealSeconds(question)) +
+        CLIP_REPORT_MARGIN_SECONDS
+      : CLIP_REPORT_LIMIT_SECONDS;
+    this.clipReportHandle = safeTimeout('clip report', () => {
+      this.clipReportHandle = undefined;
+      // The same checks as a real report, so a stale guard changes nothing.
+      const { advanced } = reading ? this.contentFinished(presentationId) : this.answerFinished(presentationId);
+      if (advanced) this.room.changed();
+    }, seconds * 1000, () => this.room.changed());
   }
 
   pause(): void {
@@ -490,15 +528,12 @@ export class GameEngine {
       phase: this.phase,
       timerName: this.timer?.name ?? null,
       timerMs: this.timer ? Math.max(0, this.timer.endsAt - Date.now()) : null,
-      roundMs: this.roundEndsAt ? Math.max(0, this.roundEndsAt - Date.now()) : null,
       buzzWindowMs: this.buzzer.pending.length && this.buzzWindowEndsAt != null
         ? Math.max(0, this.buzzWindowEndsAt - Date.now()) : null,
     };
     this.clearTimer();
-    clearTimeout(this.roundTimeout);
     clearTimeout(this.buzzWindowHandle);
     this.buzzWindowEndsAt = null;
-    this.roundEndsAt = null;
     this.phase = PHASES.PAUSED;
   }
 
@@ -507,10 +542,12 @@ export class GameEngine {
     const saved = this.paused;
     this.paused = null;
     this.phase = saved.phase;
-    this.roundEndsAt = saved.roundMs == null ? null : Date.now() + saved.roundMs;
-    this.scheduleRoundEnd();
+    // Players learn of the resume at different times, so the open signal is scheduled again.
+    const rearmMs = this.phase === PHASES.BUZZER_OPEN && !this.buzzer.pending.length && saved.timerName === 'buzzer'
+      ? this.openLeadMs() : 0;
     if (saved.timerName && saved.timerMs != null) {
       const onExpire = saved.timerName === 'intro' ? () => this.beginQuestion()
+        : saved.timerName === 'ready' ? () => this.startQuestionReading()
         : saved.timerName === 'reading' ? () =>
         this.current?.type === 'forAll' ? this.openForAllAnswers() : this.openBuzzer()
         : saved.timerName === 'stake' ? () => this.passStake(this.auctionTurnId())
@@ -520,7 +557,14 @@ export class GameEngine {
           : saved.timerName === 'final' ? () => this.closeFinal()
             : saved.timerName === 'appeal' ? () => this.resolveAppeal()
               : saved.timerName === 'reveal' ? () => this.next() : undefined;
-      this.startTimer(saved.timerName, Math.max(0.001, saved.timerMs / 1000), onExpire);
+      this.startTimer(saved.timerName, Math.max(0.001, (saved.timerMs + rearmMs) / 1000), onExpire);
+    } else {
+      // Pause cleared a clip wait; a report sent while paused was dropped, so wait afresh.
+      this.armClipReportGuard();
+    }
+    if (rearmMs) {
+      this.buzzer.openedAt = Date.now() + rearmMs;
+      this.room.emitEvent({ type: 'buzzerOpen', openedAt: this.buzzer.openedAt });
     }
     if (this.phase === PHASES.STAKE_AUCTION) {
       const bidder = this.room.participants.get(this.auctionTurnId() ?? '');
@@ -536,6 +580,8 @@ export class GameEngine {
     }
     // Roster changes while paused may have satisfied the for-all completion rule.
     this.advanceForAllAfterRosterChange();
+    // A finalist may have dropped an edit while paused, releasing a held final.
+    this.closeFinalWhenAllSent();
   }
 
   /* ---------------------------------------------------------------- flow */
@@ -553,6 +599,8 @@ export class GameEngine {
       'This pack contains special or final questions; choose Simple game mode');
     }
     this.reset();
+    // Readiness is for this start only; back in the lobby everyone confirms again.
+    for (const p of this.room.participants.values()) delete p.ready;
     for (const p of this.room.players()) p.score = 0;
     this.enterRound(0);
   }
@@ -564,7 +612,6 @@ export class GameEngine {
 
   enterRound(index: number): void {
     this.clearTimer();
-    clearTimeout(this.roundTimeout);
     this.roundIndex = index;
     this.current = null;
     this.judgmentUndo = [];
@@ -575,8 +622,6 @@ export class GameEngine {
     this.removedFinalThemes = new Set();
     const finalThemes = this.finalThemeIndices().length;
     this.phase = this.round?.type === 'final' && finalThemes > 1 ? PHASES.FINAL_THEMES : PHASES.BOARD;
-    this.roundEndsAt = this.settings.timeOfRound > 0 ? Date.now() + this.settings.timeOfRound * 1000 : null;
-    this.scheduleRoundEnd();
 
     const players = this.room.players();
     if (this.round?.type === 'final') {
@@ -601,7 +646,6 @@ export class GameEngine {
 
   removeFinalTheme(actorId: string | null, actorIsModerator: boolean, themeIndex: number): void {
     this.assert(this.phase === PHASES.FINAL_THEMES, 'Final themes are not being eliminated');
-    this.assertRoundTimeRemaining();
     this.assert(actorIsModerator || actorId === this.chooserId, 'It is not your turn to choose');
     this.assert(Number.isInteger(themeIndex) && this.finalThemeIndices().includes(themeIndex) &&
       !this.removedFinalThemes.has(themeIndex), 'That theme is not available');
@@ -623,29 +667,6 @@ export class GameEngine {
       this.chooserId = finalists[(at + 1) % finalists.length].id;
     }
     this.startFinalThemeTimer();
-  }
-
-  assertRoundTimeRemaining(): void {
-    if (!this.roundEndsAt || Date.now() < this.roundEndsAt) return;
-    this.clearTimer();
-    clearTimeout(this.roundTimeout);
-    this.phase = PHASES.ROUND_END;
-    this.room.emitEvent({ type: 'roundEnd', roundIndex: this.roundIndex, outOfTime: true });
-    this.room.changed();
-    throw new Error('The round has ended');
-  }
-
-  scheduleRoundEnd(): void {
-    clearTimeout(this.roundTimeout);
-    if (!this.roundEndsAt) return;
-    this.roundTimeout = safeTimeout('round end', () => {
-      if (this.phase === PHASES.BOARD || this.phase === PHASES.FINAL_THEMES) {
-        this.clearTimer();
-        this.phase = PHASES.ROUND_END;
-        this.room.emitEvent({ type: 'roundEnd', roundIndex: this.roundIndex, outOfTime: true });
-        this.room.changed();
-      }
-    }, Math.max(0, this.roundEndsAt - Date.now()), () => this.room.changed());
   }
 
   startChoosingTimer(): void {
@@ -674,7 +695,6 @@ export class GameEngine {
 
   finish(): void {
     this.clearTimer();
-    clearTimeout(this.roundTimeout);
     this.current = null;
     this.judgmentUndo = [];
     this.auction = null;
@@ -685,7 +705,6 @@ export class GameEngine {
 
   selectQuestion(actorId: string | null, actorIsModerator: boolean, themeIndex: number, questionIndex: number): void {
     this.assert(this.phase === PHASES.BOARD, 'You cannot choose a question right now');
-    this.assertRoundTimeRemaining();
     this.assert(actorIsModerator || actorId === this.chooserId, 'It is not your turn to choose');
     this.assert(this.isAvailable(themeIndex, questionIndex), 'This question is not available');
     const round = this.round;
@@ -721,13 +740,12 @@ export class GameEngine {
       chooserBeforeQuestion: this.chooserId,
       judgments: [],
       picks: [],
-      revealAt: null,
-      readyPlayerIds: new Set<string>(),
     };
     if (round.type === 'final') {
       this.finalWagers = new Map();
       this.finalJudged = new Set();
       this.finalAnswers = new Map();
+      this.drafts = new Map();
       this.phase = PHASES.FINAL_WAGER;
       return;
     }
@@ -745,7 +763,7 @@ export class GameEngine {
     if (!this.current || (this.phase !== PHASES.INTRO && this.phase !== PHASES.BOARD)) return;
     // A host skip arrives while the intro timer is still set; the next step starts its own timers.
     this.clearTimer();
-    const { themeIndex, questionIndex, question } = this.current;
+    const { themeIndex, questionIndex } = this.current;
     if (this.current.type === 'stake') {
       // Everyone may have left during the intro. Put the cell back instead of auctioning to nobody.
       if (!this.activePlayers().length) {
@@ -759,8 +777,8 @@ export class GameEngine {
     if (this.current.type === 'forAll') {
       // Every player connected when the question starts gets a private answer slot.
       this.forAll = { eligibleIds: this.activePlayers().map((p) => p.id), answers: new Map(), judged: new Set() };
-      this.phase = PHASES.READING;
-      this.startReading(question);
+      this.drafts = new Map();
+      this.presentQuestion();
       return;
     }
     if (this.isAssignedQuestion()) {
@@ -769,8 +787,30 @@ export class GameEngine {
       this.room.emitEvent({ type: 'specialSetup', themeIndex, questionIndex });
       return;
     }
+    this.presentQuestion();
+  }
+
+  /**
+   * Shows the question with a get-ready countdown so players can read ahead and settle on their
+   * buttons. Every question type comes here once its twist (auction, secret, gift) is settled.
+   */
+  presentQuestion(): void {
+    if (this.settings.timeForQuestionReady > 0) {
+      this.phase = PHASES.READY;
+      this.startTimer('ready', this.settings.timeForQuestionReady, () => this.startQuestionReading());
+    } else this.startQuestionReading();
+  }
+
+  /** Ends the countdown: reading starts, or buttons open at once when false starts are off. */
+  startQuestionReading(): void {
+    if (!this.current) return;
+    // A host skip arrives while the ready timer is still set; the next step starts its own timers.
+    this.clearTimer();
+    const { question } = this.current;
     this.phase = PHASES.READING;
-    if (!this.settings.falseStart && !this.hasWaitForFinishMedia(question)) {
+    // Only buzzer questions may skip reading; for-all and assigned questions always read first.
+    if (this.current.type !== 'forAll' && !this.isAssignedQuestion() &&
+        !this.settings.falseStart && !this.readingEndsOnSignal(question)) {
       const totalSeconds = this.estimateReadingSeconds(question) + this.settings.timeForThinkingOnQuestion;
       this.openBuzzer(totalSeconds);
     } else {
@@ -800,6 +840,27 @@ export class GameEngine {
 
   auctionTurnId(): string | null {
     return this.auction?.order[this.auction.turnIndex] ?? null;
+  }
+
+  /**
+   * The bidder's phone dropped (a refresh, an app switch). Skipping them at once burned the whole
+   * question when everyone else had passed (device playtest F16), so the turn waits a short grace,
+   * never longer than the bid clock had left. Still offline then: the turn moves on as before.
+   */
+  holdAuctionTurn(playerId: string): void {
+    if (this.phase !== PHASES.STAKE_AUCTION || this.auctionTurnId() !== playerId) return;
+    const leftMs = this.timer ? this.timer.endsAt - Date.now() : AUCTION_RECONNECT_GRACE_MS;
+    this.startTimer('stake', Math.max(0.001, Math.min(leftMs, AUCTION_RECONNECT_GRACE_MS) / 1000), () => {
+      if (this.auctionTurnId() !== playerId) return;
+      if (this.room.participants.get(playerId)?.connected) this.passStake(playerId);
+      else this.advanceStakeAuction();
+    });
+  }
+
+  /** The bidder is back within the grace: their turn gets a fresh bid clock. */
+  resumeAuctionTurn(playerId: string): void {
+    if (this.phase !== PHASES.STAKE_AUCTION || this.auctionTurnId() !== playerId) return;
+    this.startTimer('stake', this.settings.timeForMakingStake, () => this.passStake(playerId));
   }
 
   /** Skips passed/disconnected players and the current leader; their prior bid still stands. */
@@ -860,13 +921,13 @@ export class GameEngine {
       // Everyone passed or the high bidder left: never assign an offline answerer.
       this.phase = PHASES.REVEAL;
       this.current.answerShown = true;
+      this.scheduleRevealClose();
       return;
     }
     this.current.price = auction.amount;
     this.current.assignedId = auction.leaderId;
-    this.phase = PHASES.READING;
     this.room.emitEvent({ type: 'stakeWon', playerId: auction.leaderId, amount: auction.amount });
-    this.startReading(this.current.question);
+    this.presentQuestion();
   }
 
   openForAllAnswers(): void {
@@ -904,6 +965,12 @@ export class GameEngine {
   closeForAllAnswers(): void {
     this.assert(this.phase === PHASES.FOR_ALL_ANSWERING && this.forAll, 'Answers are closed');
     this.clearTimer();
+    // A sent for-all answer is final (no resubmit), so a draft only fills an empty slot.
+    for (const id of this.forAllEligibleIds()) {
+      const draft = this.drafts.get(id);
+      if (draft && !this.forAll.answers.has(id)) this.forAll.answers.set(id, draft);
+    }
+    this.drafts.clear();
     this.phase = PHASES.FOR_ALL_JUDGE;
     if (!this.forAllEligibleIds().length) this.revealAnswer();
   }
@@ -959,11 +1026,11 @@ export class GameEngine {
       this.recordJudgment(playerId, true, price, price, 0, 'gift');
       current.answerShown = true;
       this.phase = PHASES.REVEAL;
+      this.scheduleRevealClose();
       this.room.emitEvent({ type: 'giftAwarded', playerId, price });
       return;
     }
-    this.phase = PHASES.READING;
-    this.startReading(question);
+    this.presentQuestion();
   }
 
   setFinalWager(playerId: string, amount: number): void {
@@ -990,6 +1057,32 @@ export class GameEngine {
     this.startTimer('final', this.settings.timeForFinalThinking, () => this.closeFinal());
   }
 
+  /**
+   * Saves what a player has typed but not sent. Accepted while the answer box is open, also during a
+   * pause. A draft never counts as an answer. Returns true when others must hear about it: a
+   * finalist started or stopped changing a sent answer (the host sees who holds the close), or
+   * dropping such a change let a held final close.
+   */
+  saveDraft(playerId: string, text: unknown): boolean {
+    this.assert(typeof text === 'string' && text.length <= 350, 'Answer must be at most 350 characters');
+    const phase = this.phase === PHASES.PAUSED ? this.paused?.phase : this.phase;
+    if (phase === PHASES.FINAL_QUESTION) {
+      this.assert(this.finalEligibleIds().includes(playerId) && !this.finalJudged.has(playerId),
+        'You are not playing this final');
+    } else {
+      this.assert(phase === PHASES.FOR_ALL_ANSWERING && this.forAll, 'Answers are closed');
+      this.assert(this.forAllEligibleIds().includes(playerId) && !this.forAll.answers.has(playerId),
+        'You cannot answer this question');
+    }
+    const editing = () => this.finalAnswers.has(playerId) && this.drafts.has(playerId);
+    const wasEditing = editing();
+    const draft = text.trim();
+    // A draft equal to the sent final answer is no edit at all.
+    if (draft && draft !== this.finalAnswers.get(playerId)) this.drafts.set(playerId, draft);
+    else this.drafts.delete(playerId);
+    return this.closeFinalWhenAllSent() || editing() !== wasEditing;
+  }
+
   /** Finalists write a private answer so the host can judge what they actually said. */
   submitFinalAnswer(playerId: string, answer: unknown): void {
     this.assert(this.phase === PHASES.FINAL_QUESTION, 'Final answers are closed');
@@ -998,15 +1091,33 @@ export class GameEngine {
     this.assert(typeof answer === 'string' && answer.trim().length > 0 && answer.length <= 350,
       'Answer must be 1–350 characters');
     this.finalAnswers.set(playerId, answer.trim());
-    // Everyone online has answered: waiting out the clock would only stall the room.
+    // The sent text replaces any draft; a later edit saves a new draft that wins at close.
+    this.drafts.delete(playerId);
+    this.closeFinalWhenAllSent();
+  }
+
+  /**
+   * Everyone online has sent an answer and nobody is changing one: waiting out the clock would only
+   * stall the room. An edit typed after sending holds the close, so another player's last answer can
+   * never lock in someone's half-typed change; the timer or the host still ends it.
+   */
+  closeFinalWhenAllSent(): boolean {
+    if (this.phase !== PHASES.FINAL_QUESTION) return false;
     const waiting = this.finalEligibleIds().filter((id) => !this.finalJudged.has(id) &&
-      this.room.participants.get(id)?.connected && !this.finalAnswers.has(id));
-    if (!waiting.length) this.closeFinal();
+      this.room.participants.get(id)?.connected && (!this.finalAnswers.has(id) || this.drafts.has(id)));
+    if (waiting.length) return false;
+    this.closeFinal();
+    return true;
   }
 
   closeFinal(): void {
     this.assert(this.phase === PHASES.FINAL_QUESTION, 'Final question is not open');
     this.clearTimer();
+    // Sending clears a draft, so any draft left here was typed after the last send: it is the newest text.
+    for (const [id, draft] of this.drafts) {
+      if (this.finalEligibleIds().includes(id) && !this.finalJudged.has(id)) this.finalAnswers.set(id, draft);
+    }
+    this.drafts.clear();
     this.phase = PHASES.FINAL_JUDGE;
     if (this.finalEligibleIds().every((id) => this.finalJudged.has(id))) this.revealAnswer();
   }
@@ -1046,36 +1157,24 @@ export class GameEngine {
       (item.type === 'audio' || item.type === 'video') && item.waitForFinish);
   }
 
-  startReading(question: Question): void {
-    const syncLeadMs = this.room.hasMeasuredPing()
-      ? Math.min(1000, this.room.maxConnectedPingMs() + 40)
-      : 0;
-    if (this.current) {
-      this.current.revealAt = Date.now() + syncLeadMs;
-    }
-    // A media completion signal, not an estimated duration, ends a waitForFinish script.
-    if (this.hasWaitForFinishMedia(question)) {
-      this.clearTimer();
-      return;
-    }
-    this.startTimer('reading', this.estimateReadingSeconds(question) + syncLeadMs / 1000, () =>
-      this.current?.type === 'forAll' ? this.openForAllAnswers() : this.openBuzzer());
+  /**
+   * Reading that the host's device ends (contentFinished), not an estimate: a waitForFinish script,
+   * and a select question with a clip, whose options appear one by one only after the clip ends.
+   */
+  readingEndsOnSignal(question: Question): boolean {
+    return this.hasWaitForFinishMedia(question) || (question.answerType === 'select' &&
+      question.content.some((item) => item.type === 'audio' || item.type === 'video'));
   }
 
-  /** Clients acknowledge they have received the locked question and are ready for synchronized reveal. */
-  markQuestionReady(pid: string, presentationId: string): { ready: boolean; readyCount: number; expectedCount: number } {
-    const current = this.current;
-    if (!current || current.presentationId !== presentationId) {
-      return { ready: false, readyCount: 0, expectedCount: 0 };
+  startReading(question: Question): void {
+    // A media completion signal, not an estimated duration, ends a waitForFinish script.
+    if (this.readingEndsOnSignal(question)) {
+      this.clearTimer();
+      this.armClipReportGuard();
+      return;
     }
-    current.readyPlayerIds.add(pid);
-    const expected = this.activePlayers();
-    // If we are in the intro and every active player is ready and has measured ping, we know everyone is synced.
-    return {
-      ready: true,
-      readyCount: current.readyPlayerIds.size,
-      expectedCount: expected.length,
-    };
+    this.startTimer('reading', this.estimateReadingSeconds(question), () =>
+      this.current?.type === 'forAll' ? this.openForAllAnswers() : this.openBuzzer());
   }
 
   /** The host's device reports that the question's media ended; buzzers open then instead of on an estimate. */
@@ -1134,14 +1233,19 @@ export class GameEngine {
   expireBuzzer(): void {
     // A press before the countdown deadline counts even if its collection window is still open.
     // Time is up with no answerer: end the question and show what the answer was.
-    if (!this.buzzer.pending.length) return this.revealAnswer({ showAnswer: true, autoNext: true });
+    if (!this.buzzer.pending.length) return this.revealAnswer();
     const pool = this.buzzer.pending;
     this.buzzer.pending = [];
     if (this.grantPendingBuzz(pool)) this.buzzer.remainingMs = 1000;
-    else this.revealAnswer({ showAnswer: true, autoNext: true });
+    else this.revealAnswer();
   }
 
-  openBuzzer(overrideSeconds?: number): void {
+  /**
+   * Opens the buttons. The open moment is scheduled `leadMs` ahead so every screen turns green
+   * together on the synced clock: a slow phone or weak Wi-Fi no longer sees the signal late.
+   * Without the lead the fastest device won ~90 % of equal-speed presses (fairness simulation).
+   */
+  openBuzzer(overrideSeconds?: number, leadMs = this.openLeadMs()): void {
     this.assert(this.phase === PHASES.READING || this.phase === PHASES.ANSWERING, 'Buttons cannot be opened now');
     this.assert(this.current?.type !== 'forAll', 'For-all questions do not use buttons');
     if (this.isAssignedQuestion()) {
@@ -1157,36 +1261,47 @@ export class GameEngine {
     this.buzzer.typedAnswer = null;
     this.buzzer.typedAnswerClosed = false;
     this.buzzer.pending = [];
-    const unlockLeadMs = this.room.hasMeasuredPing(true)
-      ? Math.min(1000, this.room.maxConnectedPingMs(true) + 30)
-      : 0;
-    this.buzzer.openedAt = Date.now() + unlockLeadMs;
-    if (this.current && this.current.revealAt === null) {
-      this.current.revealAt = this.buzzer.openedAt;
-    }
-    const baseSeconds =
+    this.buzzer.openedAt = Date.now() + leadMs;
+    const seconds =
       overrideSeconds != null
         ? overrideSeconds
         : this.buzzer.remainingMs != null
           ? this.buzzer.remainingMs / 1000
           : this.settings.timeForThinkingOnQuestion;
-    this.startTimer('buzzer', baseSeconds + unlockLeadMs / 1000, () => this.expireBuzzer());
+    // The lead is waiting, not thinking time, so the countdown gets it on top.
+    this.startTimer('buzzer', seconds + leadMs / 1000, () => this.expireBuzzer());
     this.room.emitEvent({ type: 'buzzerOpen', openedAt: this.buzzer.openedAt });
   }
 
-  resolvePressTimestamp(serverNow: number, rawClientAt?: unknown, playerId?: string): number {
-    const openedAt = this.buzzer.openedAt ?? serverNow;
+  /** The open lead for the players seated now: the host's setting, longer for a slow connection. */
+  openLeadMs(): number {
+    return openLeadMs(this.settings.buzzOpenLeadMs, this.room.worstPlayerRttMs());
+  }
+
+  /** The comparison window for the players seated now: the host's setting, longer for a slow upload. */
+  syncWindowMs(): number {
+    return syncWindowMs(this.settings.buzzSyncWindowMs, this.room.worstPlayerRttMs());
+  }
+
+  /** When the player pressed, on the server clock, from their calibrated device time. */
+  clientPressTime(serverNow: number, rawClientAt?: unknown): number {
     const num = Number(rawClientAt);
-    if (!Number.isFinite(num)) return Math.max(openedAt, serverNow);
-    const player = playerId ? this.room.participants.get(playerId) : undefined;
-    const measuredAllowance = player?.pingMs != null
-      ? player.pingMs + (player.jitterMs ?? 0) * 2 + 100
-      : 0;
-    const trustMs = Math.min(1200, Math.max(CLIENT_CLOCK_TRUST_MS, measuredAllowance));
-    // A player's clock is trusted only a little way back (500 ms default, or up to measured RTT) and never before openedAt.
-    const minAllowed = Math.max(openedAt, serverNow - trustMs);
-    const maxAllowed = Math.max(openedAt, serverNow + 20);
-    return Math.min(maxAllowed, Math.max(minAllowed, num));
+    if (!Number.isFinite(num)) return serverNow;
+    // A player's clock is trusted only a little way back, so a skewed or forged clientAt cannot
+    // jump the queue by seconds (audit SEC-4).
+    return Math.min(serverNow + 20, Math.max(serverNow - CLIENT_CLOCK_TRUST_MS, num));
+  }
+
+  resolvePressTimestamp(serverNow: number, rawClientAt?: unknown): number {
+    // An early press allowed by the rules (false starts off) counts as pressed at the signal.
+    return Math.max(this.buzzer.openedAt ?? serverNow, this.clientPressTime(serverNow, rawClientAt));
+  }
+
+  blockFalseStart(playerId: string, now: number): { result: BuzzResult } {
+    this.buzzer.blockedUntil.set(playerId, now + this.settings.timeForBlockingButton * 1000);
+    this.room.emitEvent({ type: 'falseStart', playerId });
+    this.room.changed();
+    return { result: 'falseStart' };
   }
 
   buzz(playerId: string, meta: { clientAt?: number } = {}): { result: BuzzResult } {
@@ -1197,30 +1312,20 @@ export class GameEngine {
     if (this.phase === PHASES.READING) {
       if (this.isAssignedQuestion()) return { result: 'ignored' };
       if (!this.settings.falseStart) {
-        this.openBuzzer();
+        // Someone already pressed, so there is nothing to wait for: open at once.
+        this.openBuzzer(undefined, 0);
         return this.buzz(playerId, meta);
       }
-      this.buzzer.blockedUntil.set(playerId, now + this.settings.timeForBlockingButton * 1000);
-      this.room.emitEvent({ type: 'falseStart', playerId });
-      this.room.changed();
-      return { result: 'falseStart' };
+      return this.blockFalseStart(playerId, now);
     }
 
     if (this.phase !== PHASES.BUZZER_OPEN) return { result: 'ignored' };
     if (this.buzzer.attempted.has(playerId)) return { result: 'ignored' };
     if ((this.buzzer.blockedUntil.get(playerId) ?? 0) > now) return { result: 'ignored' };
-
-    // Validate that no synchronized press timestamp predates the scheduled unlock time (openedAt).
-    if (this.buzzer.openedAt != null && Number.isFinite(meta?.clientAt) &&
-        Number(meta.clientAt) < this.buzzer.openedAt && now < this.buzzer.openedAt) {
-      if (this.settings.falseStart) {
-        this.buzzer.blockedUntil.set(playerId, now + this.settings.timeForBlockingButton * 1000);
-        this.room.emitEvent({ type: 'falseStart', playerId });
-        this.room.changed();
-        return { result: 'falseStart' };
-      }
-      return { result: 'ignored' };
-    }
+    // Pressed before the scheduled signal. With device time this also catches a laggy press made
+    // before green that arrives after it; arrival order cannot tell those apart.
+    const pressedAt = this.settings.buzzSyncMode === 'clientTimestamp' ? this.clientPressTime(now, meta?.clientAt) : now;
+    if (this.settings.falseStart && pressedAt < (this.buzzer.openedAt ?? now)) return this.blockFalseStart(playerId, now);
 
     if (this.buzzer.pending[0]?.mode === 'random' ||
         (!this.buzzer.pending.length && this.settings.buttonPressMode === 'randomWithinInterval' && this.settings.buttonPressIntervalMs > 0)) {
@@ -1234,13 +1339,9 @@ export class GameEngine {
       return { result: 'queued' };
     }
 
-    const usePingReconciliation = this.room.hasMeasuredPing(true) && Number.isFinite(meta?.clientAt);
     if (this.buzzer.pending[0]?.mode === 'clientTimestamp' ||
-        (!this.buzzer.pending.length && (
-          (this.settings.buzzSyncMode === 'clientTimestamp' && this.settings.buzzSyncWindowMs > 0) ||
-          usePingReconciliation
-        ))) {
-      const effectiveAt = this.resolvePressTimestamp(now, meta?.clientAt, playerId);
+        (!this.buzzer.pending.length && this.settings.buzzSyncMode === 'clientTimestamp' && this.settings.buzzSyncWindowMs > 0)) {
+      const effectiveAt = this.resolvePressTimestamp(now, meta?.clientAt);
       const firstPress = this.buzzer.pending.length === 0;
       if (!this.buzzer.pending.some((p) => p.playerId === playerId)) {
         this.buzzer.pending.push({
@@ -1252,14 +1353,7 @@ export class GameEngine {
         });
       }
       if (firstPress) {
-        const maxPing = this.room.maxConnectedPingMs(true);
-        const pingWindowMs = this.room.hasMeasuredPing(true)
-          ? Math.min(1000, Math.max(40, maxPing + 25))
-          : 0;
-        const windowMs = this.settings.buzzSyncMode === 'clientTimestamp'
-          ? Math.max(this.settings.buzzSyncWindowMs, pingWindowMs)
-          : pingWindowMs;
-        this.scheduleBuzzWindow(windowMs);
+        this.scheduleBuzzWindow(this.syncWindowMs());
       }
       return { result: 'queued' };
     }
@@ -1359,7 +1453,7 @@ export class GameEngine {
         this.settings.ignoreWrong || this.current.type === 'noRisk' ? 0 : -price);
       this.chooserId = this.buzzer.winnerId;
       this.room.emitEvent({ type: 'answerJudged', playerId: this.buzzer.winnerId, correct: true, delta: reward });
-      this.revealAnswer({ showAnswer: true, autoNext: true });
+      this.revealAnswer();
       return;
     }
 
@@ -1369,11 +1463,33 @@ export class GameEngine {
     this.recordJudgment(this.buzzer.winnerId, false, delta, price, delta);
     this.buzzer.attempted.add(this.buzzer.winnerId);
     this.room.emitEvent({ type: 'answerJudged', playerId: this.buzzer.winnerId, correct: false, delta });
+    this.continueAfterMiss();
+  }
 
+  /**
+   * The answerer gives up: no points lost, but they are out for this question and the others may
+   * still buzz. An assigned question (cat, auction) must be answered, or a bidder could take a
+   * stake and walk away from it for free. Only the host passes, for the answerer, e.g. when they
+   * say "pass" out loud; players no longer have a Pass button of their own.
+   */
+  passAnswer(): void {
+    const playerId = this.buzzer.winnerId;
+    this.assert(this.phase === PHASES.ANSWERING && playerId, 'Nobody is answering');
+    this.assert(!this.isAssignedQuestion(), 'This question must be answered');
+    this.assert(this.buzzer.typedAnswer === null, 'Answer already submitted');
+    // A missed written deadline waits for the host's verdict; passing then would dodge the penalty.
+    this.assert(!this.buzzer.typedAnswerClosed, 'Answer time has ended');
+    this.buzzer.attempted.add(playerId);
+    this.room.emitEvent({ type: 'answerPassed', playerId });
+    this.continueAfterMiss();
+  }
+
+  /** After a wrong answer or a pass: reopen the buttons, or end the question when nobody is left. */
+  continueAfterMiss(): void {
     const someoneLeft = this.activePlayers().some((p) => !this.buzzer.attempted.has(p.id));
     if (someoneLeft && !this.isAssignedQuestion()) this.openBuzzer();
     // Nobody can still answer: end the question and show what the answer was.
-    else this.revealAnswer({ showAnswer: true, autoNext: true });
+    else this.revealAnswer();
   }
 
   estimateRevealSeconds(question: Question): number {
@@ -1387,7 +1503,7 @@ export class GameEngine {
     return seconds;
   }
 
-  revealAnswer({ showAnswer = true, autoNext = false }: { showAnswer?: boolean; autoNext?: boolean } = {}): void {
+  revealAnswer(): void {
     this.assert((QUESTION_PHASES.has(this.phase) && this.round?.type !== 'final') ||
       (this.phase === PHASES.FINAL_JUDGE && this.finalEligibleIds().every((id) => this.finalJudged.has(id))),
       'Judge every final answer before revealing');
@@ -1399,11 +1515,36 @@ export class GameEngine {
     clearTimeout(this.buzzWindowHandle);
     this.buzzWindowEndsAt = null;
     this.phase = PHASES.REVEAL;
-    this.current.answerShown = showAnswer;
-    if (autoNext) {
-      // Leave players time to challenge a verdict before the board advances.
-      this.startTimer('reveal', this.estimateRevealSeconds(this.current.question), () => this.next());
-    }
+    this.current.answerShown = true;
+    this.scheduleRevealClose();
+  }
+
+  /** Answer clips the host's device plays in full; a point answer shows on the picture, not its clips. */
+  hasAnswerClip(question: Question): boolean {
+    return question.answerType !== 'point' &&
+      question.answerContent.some((item) => item.type === 'audio' || item.type === 'video');
+  }
+
+  /**
+   * Every answer leaves the screen on its own, so the host never has to close a question by hand.
+   * An answer clip (the song behind a music question) plays to its end: the host's device reports
+   * that through answerFinished. Anything else stays up long enough to read it and to challenge
+   * the verdict. The final waits for the host, because moving on from it ends the game.
+   * A hidden guard (armClipReportGuard) closes a clip answer whose end report never arrives.
+   */
+  private scheduleRevealClose(waitForClip = true): void {
+    if (!this.current || this.round?.type === 'final') return;
+    if (waitForClip && this.hasAnswerClip(this.current.question)) return this.armClipReportGuard();
+    this.startTimer('reveal', this.estimateRevealSeconds(this.current.question), () => this.next());
+  }
+
+  /** The host's device reports that the answer's clips played out; the question closes then. */
+  answerFinished(presentationId: string): { advanced: boolean } {
+    if (this.phase !== PHASES.REVEAL || !this.current || this.round?.type === 'final' ||
+        this.current.presentationId !== presentationId ||
+        !this.hasAnswerClip(this.current.question)) return { advanced: false };
+    this.next();
+    return { advanced: true };
   }
 
   /** An answerer may challenge a rejection; another player may challenge an acceptance. */
@@ -1437,7 +1578,7 @@ export class GameEngine {
     this.room.emitEvent({ type: 'appealStarted', judgmentId, requesterId,
       targetId: judgment.playerId, kind });
     if (eligibleVoterIds.length) {
-      this.startTimer('appeal', this.settings.timeForShowmanDecisions || 30, () => this.resolveAppeal());
+      this.startTimer('appeal', this.settings.timeForShowmanDecisions, () => this.resolveAppeal());
     } else {
       this.resolveAppeal();
     }
@@ -1496,6 +1637,8 @@ export class GameEngine {
     }
     this.appeal = null;
     this.phase = PHASES.REVEAL;
+    // The answer clip may have ended during the vote, so the question closes on the estimate now.
+    this.scheduleRevealClose(false);
     this.room.emitEvent({ type: 'appealResolved', judgmentId: judgment.id,
       targetId: judgment.playerId, kind: appeal.kind, accepted, support, oppose });
   }
@@ -1506,8 +1649,7 @@ export class GameEngine {
     if (this.round?.type === 'final' && this.phase === PHASES.REVEAL) {
       this.judgmentUndo = [];
       const remaining = this.finalThemeIndices();
-      if (!this.settings.playAllQuestionsInFinalRound || !remaining.length ||
-          (this.roundEndsAt && Date.now() >= this.roundEndsAt)) return this.finish();
+      if (!this.settings.playAllQuestionsInFinalRound || !remaining.length) return this.finish();
       // Each final theme contributes its first question; earlier eliminations reset.
       this.current = null;
       this.appeal = null;
@@ -1523,6 +1665,8 @@ export class GameEngine {
     }
     // During the intro, Next is the host's "skip the pause", not "skip the question".
     if (this.phase === PHASES.INTRO) return this.beginQuestion();
+    // During the countdown, Next starts reading now instead of dropping a question already on screen.
+    if (this.phase === PHASES.READY) return this.startQuestionReading();
     this.assert(QUESTION_PHASES.has(this.phase) || this.phase === PHASES.SPECIAL_SETUP ||
       this.phase === PHASES.STAKE_AUCTION, 'Nothing to continue');
     this.returnToBoard();
@@ -1538,10 +1682,10 @@ export class GameEngine {
     this.forAll = null;
     this.resetBuzzer();
 
-    const outOfTime = this.roundEndsAt && Date.now() >= this.roundEndsAt;
-    if (!this.roundHasQuestionsLeft() || outOfTime) {
+    // Rounds have no clock: a round ends only when its board is empty or the host moves on.
+    if (!this.roundHasQuestionsLeft()) {
       this.phase = PHASES.ROUND_END;
-      this.room.emitEvent({ type: 'roundEnd', roundIndex: this.roundIndex, outOfTime: !!outOfTime });
+      this.room.emitEvent({ type: 'roundEnd', roundIndex: this.roundIndex });
     } else {
       this.phase = PHASES.BOARD;
       this.startChoosingTimer();
@@ -1577,7 +1721,6 @@ export class GameEngine {
       pausedPhase: this.paused?.phase ?? null,
       roundIndex: this.roundIndex,
       round: round ? { name: round.name, type: round.type } : null,
-      roundEndsAt: this.roundEndsAt,
       board:
         round?.themes.map((theme, t) => ({
           name: theme.name,
@@ -1609,8 +1752,6 @@ export class GameEngine {
         showmanComments: viewer?.role === ROLES.HOST ? c.question.info.showmanComments || null : null,
         selectionMode: c.question.typeParams?.selectionMode ?? null,
         picks: c.answerShown ? c.picks : [],
-        revealAt: c.revealAt,
-        readyPlayerIds: [...c.readyPlayerIds],
       },
       undoJudgment: canModerate && this.canUndoJudgment() && c ? {
         presentationId: c.presentationId,
@@ -1618,9 +1759,10 @@ export class GameEngine {
         playerId: c.judgments.at(-1)!.playerId,
       } : null,
       buzzer: {
-        openedAt: this.buzzer.openedAt,
         winnerId: this.buzzer.winnerId,
         winnerInfo: this.buzzer.winnerInfo,
+        // Clients keep the button at "wait" until this moment on the synced clock.
+        openedAt: this.buzzer.openedAt,
         attempted: [...this.buzzer.attempted],
         blockedUntil: viewer ? (this.buzzer.blockedUntil.get(viewer.id) ?? null) : null,
         blockedPlayers: [...this.buzzer.blockedUntil.entries()]
@@ -1663,6 +1805,8 @@ export class GameEngine {
         eligibleIds: this.phase === PHASES.FINAL_WAGER || this.phase === PHASES.FINAL_THEMES ||
           this.phase === PHASES.BOARD ? this.finalists().map((p) => p.id) : this.finalEligibleIds(),
         answeredIds: [...this.finalAnswers.keys()],
+        // Who holds the close by changing a sent answer; the host only, and never the text itself.
+        editingIds: canModerate ? [...this.drafts.keys()].filter((id) => this.finalAnswers.has(id)) : [],
         yourAnswer: viewer ? this.finalAnswers.get(viewer.id) ?? null : null,
         answers: finalShown
           ? Object.fromEntries(this.finalEligibleIds().map((id) => [id, this.finalAnswers.get(id) ?? ''])) : null,

@@ -3,6 +3,7 @@
  * picture pins and the target ring, option tiles, text that shrinks to fit, and the audio cue.
  * They only build DOM; game state and sockets stay in app.ts.
  */
+import { t } from './i18n';
 import type { ContentItem } from './types';
 
 export interface Pin {
@@ -66,7 +67,7 @@ export function drawRing(frame: HTMLElement, target: { x: number; y: number }, d
 export function makePickable(frame: HTMLElement, onPick: (point: { x: number; y: number }) => void): void {
   frame.classList.add('pickable');
   frame.setAttribute('role', 'button');
-  frame.setAttribute('aria-label', 'Tap the picture where the answer is');
+  frame.setAttribute('aria-label', t('Tap the picture where the answer is'));
   frame.addEventListener('click', (event) => {
     const box = frame.getBoundingClientRect();
     if (!box.width || !box.height) return;
@@ -86,9 +87,11 @@ export function optionTiles(options: OptionState[], onChoose: ((label: string) =
   const row = document.createElement('div');
   row.className = 'q-options';
   row.style.setProperty('--count', String(options.length));
-  for (const option of options) {
+  options.forEach((option, index) => {
     const tile = document.createElement(onChoose ? 'button' : 'div');
     tile.className = `option ${option.state}`;
+    // Its place in the queue when the options arrive one by one.
+    tile.style.setProperty('--i', String(index));
     if (tile instanceof HTMLButtonElement) {
       tile.type = 'button';
       tile.onclick = () => onChoose?.(option.label);
@@ -101,7 +104,7 @@ export function optionTiles(options: OptionState[], onChoose: ((label: string) =
     }
     tile.append(body);
     row.append(tile);
-  }
+  });
   return row;
 }
 
@@ -134,26 +137,18 @@ export function fitText(box: HTMLElement, minPx = 16): void {
   }
 }
 
-/** Audio has no picture, so a level meter shows it is playing; a tap starts blocked playback. */
-export function audioCue(media: () => HTMLMediaElement[]): HTMLButtonElement {
-  const cue = Object.assign(document.createElement('button'), { type: 'button', className: 'audio-cue' });
+/**
+ * Audio has no picture, so a level meter shows it is playing. It is only a picture, never a control:
+ * a blocked clip starts on the player's next tap anywhere (see createMediaPlayer), not from here.
+ */
+export function audioCue(media: () => HTMLMediaElement[]): HTMLDivElement {
+  const cue = Object.assign(document.createElement('div'), { className: 'audio-cue' });
+  cue.setAttribute('aria-hidden', 'true');
   const bars = Object.assign(document.createElement('span'), { className: 'bars' });
-  bars.setAttribute('aria-hidden', 'true');
   for (let i = 0; i < 5; i++) bars.append(document.createElement('i'));
-  const label = document.createElement('span');
-  cue.append(bars, label);
+  cue.append(bars);
   const sync = () => {
-    const playing = media().some((item) => !item.paused && !item.ended);
-    cue.classList.toggle('playing', playing);
-    // A muted clip still plays here when the room's sound comes from the host or TV screen.
-    const muted = media().some((item) => item.muted);
-    label.textContent = playing ? (muted ? 'Listen to the host screen' : 'Listen') : 'Tap to play the sound';
-    // While sound plays the meter is just a picture; it is a control only when playback was blocked.
-    cue.tabIndex = playing ? -1 : 0;
-    cue.setAttribute('aria-disabled', String(playing));
-  };
-  cue.onclick = () => {
-    for (const item of media()) if (item.paused && !item.ended) item.play().catch(() => {});
+    cue.classList.toggle('playing', media().some((item) => !item.paused && !item.ended));
   };
   for (const item of media()) {
     for (const type of ['play', 'pause', 'ended', 'playing']) item.addEventListener(type, sync);

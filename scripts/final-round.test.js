@@ -133,13 +133,14 @@ test('unavailable final themes are excluded from elimination and repeat play', (
   assert.equal(room.engine.isAvailable(1, 0), false);
 });
 
-test('final theme elimination stops when the round deadline has passed', (t) => {
+test('final theme elimination has no round deadline', (t) => {
   const { room, host } = finalGame(t);
   const engine = room.engine;
-  engine.roundEndsAt = Date.now() - 1;
-  assert.throws(() => engine.removeFinalTheme(host.id, true, 0), /round has ended/);
-  assert.equal(engine.phase, 'roundEnd');
-  assert.deepEqual([...engine.removedFinalThemes], []);
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  Date.now = () => realNow() + 3 * 60 * 60 * 1000;
+  engine.removeFinalTheme(host.id, true, 0);
+  assert.deepEqual([...engine.removedFinalThemes], [0]);
 });
 
 test('a removed finalist cannot block the reveal', (t) => {

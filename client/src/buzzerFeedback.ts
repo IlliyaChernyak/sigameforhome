@@ -6,6 +6,7 @@
  * the app resumes its session, so the server rejects it and the press was silently lost.
  * These functions are pure so the labels and the feedback rules can be unit-tested.
  */
+import { t } from './i18n';
 import type { RoomState } from './types';
 
 export type BuzzTone = 'buzz-reading' | 'buzz-open' | 'buzz-blocked' | 'buzz-you-answering' | 'buzz-idle';
@@ -41,41 +42,47 @@ export function phaseLabel({ game, youId, settings, now, touchOnly, nameOf }: Ph
   const blockedUntil = game.buzzer?.blockedUntil ?? 0;
   const alreadyTried = (game.buzzer?.attempted ?? []).includes(youId);
   if (blockedUntil > now) {
-    return label('buzz-blocked', `Blocked ${((blockedUntil - now) / 1000).toFixed(1)} s`, 'You pressed before the signal.');
+    return label('buzz-blocked', t('Blocked {seconds} s', { seconds: ((blockedUntil - now) / 1000).toFixed(1) }), t('You pressed before the signal.'));
   }
   if (alreadyTried && (game.phase === 'buzzerOpen' || game.phase === 'answering')) {
-    return label('buzz-idle', 'You already answered', 'Waiting for the others.');
+    return label('buzz-idle', t('You already answered'), t('Waiting for the others.'));
   }
   if (game.phase === 'intro') {
     // Nothing can be pressed until the question appears, whatever the false-start rule says.
-    return label('buzz-reading', 'Wait', settings.falseStart
-      ? `An early press blocks you for ${settings.timeForBlockingButton} s.` : 'Opens after the question.');
+    return label('buzz-reading', t('Wait'), settings.falseStart
+      ? t('An early press blocks you for {seconds} s.', { seconds: settings.timeForBlockingButton }) : t('Opens after the question.'));
   }
-  if (game.phase === 'reading') {
+  if (game.phase === 'ready') {
+    // Presses during the countdown are ignored, never punished.
+    return label('buzz-reading', t('Get ready'), t('The button opens after the countdown.'));
+  }
+  // The open signal is scheduled a moment ahead so all screens turn green together; until then it reads as reading.
+  const signalPending = game.phase === 'buzzerOpen' && now < (game.buzzer?.openedAt ?? 0);
+  if (game.phase === 'reading' || signalPending) {
     return settings.falseStart
-      ? label('buzz-reading', 'Wait for green', `An early press blocks you for ${settings.timeForBlockingButton} s.`)
-      : label('buzz-open', 'Buzz', 'Press now to answer.');
+      ? label('buzz-reading', t('Wait for green'), t('An early press blocks you for {seconds} s.', { seconds: settings.timeForBlockingButton }))
+      : label('buzz-open', t('Buzz'), t('Press now to answer.'));
   }
-  if (game.phase === 'buzzerOpen') return label('buzz-open', 'Buzz', touchOnly ? 'Tap here.' : 'Tap here or press Space.');
+  if (game.phase === 'buzzerOpen') return label('buzz-open', t('Buzz'), touchOnly ? t('Tap here.') : t('Tap here or press Space.'));
   if (game.phase === 'answering') {
     if (game.buzzer.winnerId === youId) {
-      return label('buzz-you-answering', 'Your answer',
-        (game.current?.answerType ?? 'text') === 'text' ? 'Say it out loud to the host.' : 'Tap your answer on the stage.');
+      return label('buzz-you-answering', t('Your answer'),
+        (game.current?.answerType ?? 'text') === 'text' ? t('Say it out loud to the host.') : t('Tap your answer on the stage.'));
     }
-    return label('buzz-idle', `${nameOf(game.buzzer.winnerId)} answers`, 'Get ready in case they are wrong.');
+    return label('buzz-idle', t('{name} answers', { name: nameOf(game.buzzer.winnerId) }), t('Get ready in case they are wrong.'));
   }
-  return label('buzz-idle', 'Waiting for a question', 'The button opens after a question is chosen.');
+  return label('buzz-idle', t('Waiting for a question'), t('The button opens after a question is chosen.'));
 }
 
 /** Layers the connection and the last press on top of the phase label. */
 export function buzzerView(phase: BuzzerLabel, connected: boolean, send: SendState): BuzzerView {
   // An idle buzzer is hidden anyway; the connection bar already says the phone is offline.
   if (!connected && phase.tone !== 'buzz-idle') {
-    return { tone: 'buzz-blocked', main: 'Offline', sub: 'Not connected. Presses do not count until you are back.',
+    return { tone: 'buzz-blocked', main: t('Offline'), sub: t('Not connected. Presses do not count until you are back.'),
       disabled: true, flags: ['offline'] };
   }
   if (send === 'failed') {
-    return { ...phase, main: 'Not sent', sub: 'Your press did not reach the game. Press again.', disabled: false,
+    return { ...phase, main: t('Not sent'), sub: t('Your press did not reach the game. Press again.'), disabled: false,
       flags: ['not-sent'] };
   }
   return { ...phase, disabled: false, flags: send === 'sent' ? ['sent'] : [] };

@@ -29,25 +29,61 @@ button, .button-link {
   font: 700 var(--t-s)/1.2 var(--font-ui); text-decoration: none; cursor: pointer;
   transition: background-color .15s, border-color .15s, transform .08s;
 }
-button:not(:disabled):hover, .button-link:hover { background: var(--set-hover); }
 button:not(:disabled):active { transform: translateY(1px); }
 button:disabled { opacity: .4; cursor: default; }
 button.primary { background: var(--lamp); border-color: transparent; color: var(--on-lamp); font-weight: 800; }
-button.primary:not(:disabled):hover { background: var(--lamp-soft); }
 button.ok { background: var(--ok-fill); border-color: transparent; }
-button.ok:not(:disabled):hover { background: var(--ok-hover); }
 button.bad { background: var(--bad-fill); border-color: transparent; }
-button.bad:not(:disabled):hover { background: var(--bad-hover); }
 button.quiet { background: transparent; }
-button.quiet:not(:disabled):hover { background: var(--set-raised); }
+/*
+ * Hover only where a real pointer hovers: touch browsers keep :hover after a tap, which repainted
+ * the buzzer after a press (device playtest F1). The generic rule sits in :where() so any state
+ * class with two classes (.buzzer.buzz-you-answering) keeps its colour under a mouse too.
+ * scripts/hover-rules.test.js keeps every :hover rule inside this kind of block.
+ */
+@media (hover: hover) and (pointer: fine) {
+  button:where(:not(:disabled)):hover, .button-link:hover { background: var(--set-hover); }
+  button.primary:not(:disabled):hover { background: var(--lamp-soft); }
+  button.ok:not(:disabled):hover { background: var(--ok-hover); }
+  button.bad:not(:disabled):hover { background: var(--bad-hover); }
+  button.quiet:not(:disabled):hover { background: var(--set-raised); }
+}
 button.small { min-height: 36px; padding: 6px 12px; font-size: var(--t-xs); }
 
-input:not([type="checkbox"]):not([type="file"]), select, textarea {
+/*
+ * Text fields only: a range slider took the field's border, padding and 44 px height, and sat in a box.
+ * :where() keeps the old specificity, so field rules elsewhere that tie with this one still win.
+ */
+input:not([type="checkbox"]):not([type="file"]):where(:not([type="range"])), select, textarea {
   width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px;
   border: 1px solid var(--rule); border-radius: var(--r-control);
   background: var(--set-sunk); color: var(--paper); font: 600 16px/1.3 var(--font-ui);
 }
 input:disabled, select:disabled { opacity: .5; }
+/* No browser spin arrows on any number field: they differ per browser and are too small to tap.
+   Fields that need them get our own − / + buttons (numberStepper.ts). */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+/* The stepper is one control: the box's border and focus ring wrap the field and both buttons. */
+.stepper {
+  display: flex; align-items: stretch; flex: 1 1 auto; min-width: 0;
+  border: 1px solid var(--rule); border-radius: var(--r-control); background: var(--set-sunk); overflow: hidden;
+}
+.stepper:has(input:focus-visible) { outline: 3px solid var(--lamp); outline-offset: 2px; }
+.stepper:has(input:disabled) { opacity: .5; }
+.stepper > input[type="number"] {
+  flex: 1 1 auto; width: 0; min-width: 3ch; border: 0; border-radius: 0; background: transparent;
+  text-align: center; font-variant-numeric: tabular-nums;
+}
+.stepper input:focus-visible, .stepper input:disabled { outline: none; opacity: 1; }
+.stepper button {
+  flex: none; width: 44px; min-height: 0; padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--lamp); font: 700 22px/1 var(--font-ui);
+}
+.stepper .step-down { order: -1; border-right: 1px solid var(--rule); }
+.stepper .step-up { border-left: 1px solid var(--rule); }
+.stepper:has(input:disabled, input:read-only) button { pointer-events: none; color: var(--mist); }
+@media (hover: hover) and (pointer: fine) { .stepper button:hover { background: var(--set-raised); } }
 textarea { resize: vertical; min-height: 88px; }
 input[type="checkbox"] { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--go); flex: none; }
 input[type="file"] { color: var(--mist); font: inherit; min-width: 0; flex: 1; }

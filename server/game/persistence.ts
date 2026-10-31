@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { config } from '../config.ts';
 import { loadPack } from '../packs/packManager.ts';
 import { PHASES, type Phase } from './constants.ts';
-import { defaultSettings, type GameSettings } from './settings.ts';
+import { restoreSettings, type GameSettings } from './settings.ts';
 import { armGrace, graceModeForSavedPhase } from './seatGrace.ts';
 import { startHandover } from './moderationHandover.ts';
 import type { CurrentQuestionState, Judgment } from './GameEngine.ts';
@@ -15,10 +15,9 @@ interface SavedGame {
   phase: Phase;
   roundIndex: number;
   played: string[];
-  paused?: { phase: Phase; roundMs: number | null } | null;
+  paused?: { phase: Phase } | null;
   removedFinalThemes?: number[];
   chooserId: string | null;
-  roundEndsAt: number | null;
   current?: Pick<CurrentQuestionState, 'themeIndex' | 'questionIndex' | 'chooserBeforeQuestion'> & {
     judgments: Judgment[];
   } | null;
@@ -51,7 +50,7 @@ export async function restoreRoom(room: Room, stateFile = file): Promise<void> {
         console.warn(`[room] Pack not restored: ${(err as Error).message}`);
       }
     }
-    room.settings = { ...defaultSettings(), ...saved.settings };
+    room.settings = restoreSettings(saved.settings);
     for (const entry of saved.participants) {
       const participant: Participant = { ...entry,
         mediaTicket: entry.mediaTicket || crypto.randomBytes(24).toString('base64url'),
@@ -66,12 +65,10 @@ export async function restoreRoom(room: Room, stateFile = file): Promise<void> {
       room.engine.played = new Set(game.played);
       room.engine.removedFinalThemes = new Set(game.removedFinalThemes ?? []);
       room.engine.chooserId = game.chooserId;
-      room.engine.roundEndsAt = game.phase === PHASES.PAUSED ? null
-        : game.roundEndsAt && game.roundEndsAt > Date.now() ? game.roundEndsAt : null;
       const restoredPhase: Phase = game.phase === PHASES.PAUSED ? game.paused?.phase ?? PHASES.BOARD : game.phase;
       // Replay an interrupted question from the board; scores and prior questions remain.
       if (([PHASES.SPECIAL_SETUP, PHASES.STAKE_AUCTION, PHASES.FOR_ALL_ANSWERING, PHASES.FOR_ALL_JUDGE,
-        PHASES.APPEAL_VOTE, PHASES.INTRO,
+        PHASES.APPEAL_VOTE, PHASES.INTRO, PHASES.READY,
         PHASES.READING, PHASES.BUZZER_OPEN, PHASES.ANSWERING,
         PHASES.FINAL_WAGER, PHASES.FINAL_QUESTION, PHASES.FINAL_JUDGE] as Phase[]).includes(restoredPhase) && game.current) {
         room.engine.played.delete(`${game.roundIndex}:${game.current.themeIndex}:${game.current.questionIndex}`);
@@ -88,8 +85,7 @@ export async function restoreRoom(room: Room, stateFile = file): Promise<void> {
           // A completed final answer may lead to another theme when the full-final rule is enabled.
           room.engine.removedFinalThemes.clear();
           const remaining = room.engine.finalThemeIndices().length;
-          room.engine.phase = !room.settings.playAllQuestionsInFinalRound || !remaining ||
-            (room.engine.roundEndsAt && Date.now() >= room.engine.roundEndsAt)
+          room.engine.phase = !room.settings.playAllQuestionsInFinalRound || !remaining
             ? PHASES.GAME_OVER : remaining > 1 ? PHASES.FINAL_THEMES : PHASES.BOARD;
         } else {
           room.engine.phase = room.engine.roundHasQuestionsLeft() ? PHASES.BOARD : PHASES.ROUND_END;
@@ -99,12 +95,9 @@ export async function restoreRoom(room: Room, stateFile = file): Promise<void> {
           ? restoredPhase : PHASES.BOARD;
       }
       if (game.phase === PHASES.PAUSED) {
-        // Replayed questions return to the board, but an explicit pause must keep its round clock stopped.
-        room.engine.paused = { phase: room.engine.phase, timerName: null, timerMs: null,
-          roundMs: game.paused?.roundMs ?? null };
+        // Replayed questions return to the board, but an explicit pause stays paused.
+        room.engine.paused = { phase: room.engine.phase, timerName: null, timerMs: null };
         room.engine.phase = PHASES.PAUSED;
-      } else {
-        room.engine.scheduleRoundEnd();
       }
     }
     // Everyone restored is offline, so give each the normal reconnect window (audit CONN-4).
@@ -139,7 +132,7 @@ export function persistRoom(room: Room, stateFile = file): () => Promise<void> {
       game: { phase: game.phase, roundIndex: game.roundIndex, played: [...game.played],
         paused: game.paused,
         removedFinalThemes: [...game.removedFinalThemes],
-        chooserId: game.chooserId, roundEndsAt: game.roundEndsAt,
+        chooserId: game.chooserId,
         current: game.current && { themeIndex: game.current.themeIndex, questionIndex: game.current.questionIndex,
           chooserBeforeQuestion: game.current.chooserBeforeQuestion,
           judgments: game.current.judgments } },

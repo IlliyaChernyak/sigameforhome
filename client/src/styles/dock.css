@@ -79,7 +79,7 @@
 /* "Wait" is neutral: nothing to press yet, so it must not look like a lit lamp. */
 .buzzer.buzz-reading { background: var(--set-raised); color: var(--mist); box-shadow: inset 0 0 0 2px var(--rule-strong); }
 .buzzer.buzz-open { background: var(--go); color: var(--on-go); }
-.buzzer.buzz-open:not(:disabled):hover { background: var(--go-hover); }
+@media (hover: hover) and (pointer: fine) { .buzzer.buzz-open:not(:disabled):hover { background: var(--go-hover); } }
 /* A press gets visible confirmation; offline or unconfirmed presses say so (audit UX-3). */
 .buzzer.sent { box-shadow: inset 0 0 0 4px var(--paper); }
 .buzzer.not-sent { box-shadow: inset 0 0 0 4px var(--stop); }
@@ -97,8 +97,11 @@
   .stage-progress-track { flex-basis: 100%; height: 4px; }
 }
 @media (max-width: 600px) {
-  /* One line on phones: the buzzer already states the pressing rule in full. */
-  .stage-subtitle { font-size: var(--t-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /*
+   * At most two lines on phones. One line cut the part that mattered ("Time is up. Waiting for a
+   * question to…", device playtest F6); two lines fit every banner text at 320 px.
+   */
+  .stage-subtitle { font-size: var(--t-xs); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   #host-controls { padding: 8px; gap: 6px; }
   #host-controls > button { flex: 1 1 auto; }
   #host-controls > button[data-act="judge-ok"], #host-controls > button[data-act="judge-bad"] { min-width: 0; flex: 1 1 40%; }

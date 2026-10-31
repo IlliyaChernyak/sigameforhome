@@ -89,6 +89,39 @@ test('a restore with the host offline starts the same wait', async (t) => {
   assert.equal(restored.canModerate(P.id), true);
 });
 
+test('a host who also owns the room hands ownership over, so the seat can be reassigned', (t) => {
+  const room = new Room();
+  cleanup(t, room);
+  const H = room.join('H').participant;
+  room.attach(H.id, 'h');
+  room.chooseInitialRole(H.id, 'host');
+  const P = room.join('P').participant;
+  room.attach(P.id, 'p');
+  room.detach(H.id, 'h');
+  assert.equal(room.ownerId, H.id); // a short blip moves nothing
+  markHandoverReady(room, H.id);
+  assert.equal(room.ownerId, P.id);
+  assert.equal(room.canModerate(P.id), true);
+  room.setRole(P.id, H.id, 'spectator');
+  room.setRole(P.id, P.id, 'host');
+  assert.equal(room.host()?.id, P.id);
+});
+
+test('a returning host keeps host rights after ownership moved', (t) => {
+  const room = new Room();
+  cleanup(t, room);
+  const H = room.join('H').participant;
+  room.attach(H.id, 'h');
+  room.chooseInitialRole(H.id, 'host');
+  const P = room.join('P').participant;
+  room.attach(P.id, 'p');
+  room.detach(H.id, 'h');
+  markHandoverReady(room, H.id);
+  room.attach(H.id, 'h2');
+  assert.equal(room.canModerate(H.id), true);
+  assert.equal(room.canModerate(P.id), false);
+});
+
 test('with no host at all the owner-player moderates at once', (t) => {
   const room = new Room();
   cleanup(t, room);

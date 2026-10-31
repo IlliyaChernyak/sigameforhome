@@ -36,7 +36,7 @@ The host can pause and resume the current phase; question media and round countd
 Pack media URLs carry a viewer ticket; the server only serves the current question and
 revealed answer media to players. Keep room links within the local network.
 Pack HTML displays in a sandbox with static relative images and styles; scripts are blocked.
-Pack uploads are limited to 200 MB, validated before they appear in the list, and require a connected host or room owner.
+Pack uploads are limited to 200 MB, validated before they appear in the list, and require a connected host (or the room owner while no host is present).
 Workshop updates keep prior pack versions so a saved game can resume with the same questions after a restart.
 
 Guided classic mode supports standard, no-risk, secret, secret gifts without a question, stake auctions, for-all questions, and final questions.
@@ -136,8 +136,8 @@ Every client event is `(payload, ack)`. The ack returns `{ ok: true, ... }` or `
 | `role:choose` | first joiner | `{ role: 'host' \| 'player' }` |
 | `role:set` | self / host | `{ targetId, role }` |
 | `participant:kick`, `score:adjust` | host | `{ targetId }`, `{ targetId, delta }` |
-| `packs:list`, `packs:load`, `steam:download` | host/owner | `{ file }`, `{ link }` |
-| `settings:schema`, `settings:update` | anyone / host/owner | patch object |
+| `packs:list`, `packs:load`, `steam:download` | host | `{ file }`, `{ link }` |
+| `settings:schema`, `settings:update` | anyone / host | patch object |
 | `game:start`, `game:stop`, `game:pause`, `game:resume`, `game:select`, `game:openBuzzer`, `game:buzz`, `game:judge`, `game:reveal`, `game:next`, `game:nextRound` | as appropriate | |
 | `game:answer` | selected player in written-answer mode | `{ answer }` (1–350 characters before the answer deadline) |
 | `game:contentFinished` | current moderator | `{ presentationId }` for a finished wait-for-media question |

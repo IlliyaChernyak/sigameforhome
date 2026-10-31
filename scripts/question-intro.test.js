@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-intro-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -46,7 +47,7 @@ function createRoom(t, settings = {}) {
   const bob = room.join('Bob').participant;
   room.attach(bob.id, 'bob-socket');
   room.setPack({ ...loaded, pack });
-  room.updateSettings(host.id, { gameMode: 'classic', falseStart: true, timeForQuestionIntro: 2, ...settings });
+  room.updateSettings(host.id, { ...INSTANT_BUZZER, gameMode: 'classic', falseStart: true, timeForQuestionIntro: 2, timeForQuestionReady: 0, ...settings });
   room.engine.start();
   t.after(() => {
     room.engine.reset();
@@ -222,10 +223,10 @@ test('options stay hidden during an auction and a special setup', (t) => {
 });
 
 test('with the intro set to 0 a pick goes straight to its step', (t) => {
-  const { engine } = createRoom(t, { timeForQuestionIntro: 0 });
+  const { engine } = createRoom(t, { timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   pick(engine, PLAIN);
   assert.equal(engine.phase, 'reading');
-  const stake = createRoom(t, { timeForQuestionIntro: 0 });
+  const stake = createRoom(t, { timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   pick(stake.engine, STAKE);
   assert.equal(stake.engine.phase, 'stakeAuction');
 });

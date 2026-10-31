@@ -40,7 +40,7 @@ function createRoom(t, { start = false } = {}) {
   const other = room.join('Other').participant;
   room.attach(other.id, 'other');
   room.setPack(loaded);
-  room.updateSettings(host.id, { timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   if (start) room.engine.start();
   return { room, host, player, other };
 }
