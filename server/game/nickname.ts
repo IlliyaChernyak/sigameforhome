@@ -1,8 +1,8 @@
 /**
  * Nicknames: one set of rules for joining and renaming (audit QOL-2).
  *
- * A player on a new phone joins a fresh seat. The host then removes the old offline seat,
- * renames the newcomer to the old name, and adds the score back. Rename never changes a
+ * A player on a new phone joins a fresh seat under another name; the host then gives them the
+ * old offline seat back in one step (Room.giveSeat, device playtest F7). Rename never changes a
  * participant's id, so judgments, wagers and the chooser stay attached to the right seat.
  */
 import { PHASES } from './constants.ts';
@@ -22,9 +22,13 @@ export function normalizeNickname(raw: unknown): string {
 
 /** Names are unique ignoring case; `exceptId` lets a participant keep their own name. */
 export function assertNicknameFree(room: Room, name: string, exceptId?: string): void {
-  const taken = [...room.participants.values()]
-    .some((p) => p.id !== exceptId && p.name.toLowerCase() === name.toLowerCase());
-  if (taken) throw new Error('This nickname is already taken');
+  const owner = [...room.participants.values()]
+    .find((p) => p.id !== exceptId && p.name.toLowerCase() === name.toLowerCase());
+  // An offline seat usually means its player is back on another device: point them at the way back.
+  if (owner && !owner.connected) {
+    throw new Error('This nickname is already taken by a seat that is offline. Join with another name; the host can give you that seat back.');
+  }
+  if (owner) throw new Error('This nickname is already taken');
 }
 
 /**

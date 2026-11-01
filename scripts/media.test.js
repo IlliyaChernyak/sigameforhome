@@ -73,6 +73,41 @@ test('ordered content waits for media end, preserves pause, and ignores stale pl
   presenter.dispose();
 });
 
+test('a screen that starts late runs the script on the shared timeline and catches up', async () => {
+  const shown = [];
+  const origin = Date.now() - 1000; // the room started this script a second ago
+  const presenter = new ContentPresenter([
+    { type: 'image', duration: 0.5 },
+    { type: 'audio' },
+  ], (item, index, active) => { if (active) shown.push([index, Date.now()]); }, () => {}, 0);
+  presenter.start(origin);
+  const deadline = Date.now() + 300;
+  while (shown.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(shown.length, 2, 'the overdue picture step is skipped at once');
+  // The clip was due half a second in, so the player seeks it to where the room is.
+  assert.equal(presenter.startOf(1), origin + 500);
+  presenter.dispose();
+});
+
+test('a pause moves the shared timeline later by its length, and a future start waits', async () => {
+  const shown = [];
+  const origin = Date.now() + 60;
+  const presenter = new ContentPresenter([{ type: 'image', duration: 0.05 }, { type: 'audio' }],
+    (item, index, active) => { if (active) shown.push(index); }, () => {}, 0);
+  presenter.start(origin);
+  assert.equal(presenter.startOf(0), origin);
+  presenter.setPaused(true);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(shown, [0], 'nothing advances while paused');
+  presenter.setPaused(false);
+  const moved = presenter.startOf(0) - origin;
+  assert.ok(moved >= 140 && moved < 400, `the start moved by the pause (${moved} ms)`);
+  const deadline = Date.now() + 500;
+  while (shown.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(presenter.startOf(1), presenter.startOf(0) + 50);
+  presenter.dispose();
+});
+
 test('distinct transcodes share a process-wide concurrency limit', async () => {
   let running = 0;
   let peak = 0;

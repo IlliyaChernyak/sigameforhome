@@ -19,9 +19,16 @@ export class ContentPresenter<T extends PresentedContent> {
   private disposed = false;
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private deadline = 0;
-  private remainingMs = 0;
   private timerCallback: (() => void) | null = null;
+  /*
+   * The script runs on one timeline. `origin` is the local time it starts (a pause moves it later)
+   * and `position` the planned moment of the next step. Steps are due at origin + position, so
+   * chained timers never drift, and a screen that starts late catches up to the others.
+   */
+  private origin = 0;
+  private position = 0;
+  private pausedAt = 0;
+  private readonly starts: number[] = [];
   private pending: (() => void) | null = null;
   private visibleCharacters = 0;
   private textCharacters: string[] = [];
@@ -39,26 +46,32 @@ export class ContentPresenter<T extends PresentedContent> {
     return this.finished;
   }
 
-  start(): void {
+  /** `origin` is the local time the script starts on every screen; it may lie ahead or behind. */
+  start(origin = Date.now()): void {
+    this.origin = origin;
     this.next();
+  }
+
+  /** Local time item `index` started (or was due to) on the shared timeline; null before it shows. */
+  startOf(index: number): number | null {
+    return this.starts[index] == null ? null : this.origin + this.starts[index];
   }
 
   setPaused(paused: boolean): void {
     if (this.paused === paused || this.disposed) return;
     this.paused = paused;
     if (paused) {
-      if (this.timer) {
-        this.remainingMs = Math.max(1, this.deadline - Date.now());
-        clearTimeout(this.timer);
-        this.timer = null;
-      }
-    } else if (this.pending) {
+      this.pausedAt = Date.now();
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = null;
+      return;
+    }
+    this.origin += Date.now() - this.pausedAt;
+    if (this.pending) {
       const advance = this.pending;
       this.pending = null;
       advance();
-    } else if (this.remainingMs > 0 && this.timerCallback) {
-      this.schedule(this.remainingMs, this.timerCallback);
-    }
+    } else this.arm();
   }
 
   /** Re-render after a media ticket rotates, keeping the current step and timer. */
@@ -80,16 +93,21 @@ export class ContentPresenter<T extends PresentedContent> {
   }
 
   private schedule(ms: number, callback: () => void): void {
-    this.remainingMs = Math.max(0, ms);
+    this.position += Math.max(0, ms);
     this.timerCallback = callback;
-    if (this.paused || this.disposed) return;
-    this.deadline = Date.now() + this.remainingMs;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.arm();
+  }
+
+  private arm(): void {
+    if (this.paused || this.disposed || this.timer || !this.timerCallback) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.remainingMs = 0;
+      const callback = this.timerCallback;
       this.timerCallback = null;
-      callback();
-    }, this.remainingMs);
+      callback?.();
+    }, Math.max(0, this.origin + this.position - Date.now()));
   }
 
   private next(): void {
@@ -110,9 +128,13 @@ export class ContentPresenter<T extends PresentedContent> {
     if (this.disposed || this.finished) return;
     this.shown = true;
     const item = this.items[this.index];
+    if (!replay) this.starts[this.index] = this.position;
     const generation = ++this.generation;
+    const playsToEnd = (item.type === 'audio' || item.type === 'video') && item.waitForFinish;
     const done = () => {
       if (this.disposed || generation !== this.generation) return;
+      // A clip that plays to its end took real time; the timeline moves on from that moment.
+      if (playsToEnd) this.position = Math.max(this.position, (this.paused ? this.pausedAt : Date.now()) - this.origin);
       if (this.paused) this.pending = () => this.complete();
       else this.complete();
     };
@@ -127,7 +149,7 @@ export class ContentPresenter<T extends PresentedContent> {
       if (!replay) this.schedule(1000 / this.textCharsPerSecond, () => this.advanceText());
       return;
     }
-    if ((item.type === 'audio' || item.type === 'video') && item.waitForFinish) return;
+    if (playsToEnd) return;
     const durationMs = Math.max(0, (item.duration ?? 0) * 1000);
     if (durationMs) {
       if (!replay) this.schedule(durationMs, () => this.complete());

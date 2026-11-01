@@ -1,0 +1,68 @@
+/*
+ * Landscape phones (device playtest F3): about 330 px of height under the top bar. The stacked layout
+ * hid the question under the pinned buzzer and pushed bids and answers below the fold. Here the table
+ * takes the left column at full height; the status, scoreboard and whatever you act on (buzzer, bid,
+ * wager, answer, host controls) share the right column. .stage-layout and .dock only group markup, so
+ * their children become cells of this grid. app.ts moves the scoreboard into the host column here too.
+ * max-height keeps short desktop windows (1366x600) on the desktop layout.
+ * Loaded after dock.css and podiums.css so equal-specificity phone rules lose (568x320 is both). The
+ * phone table heights in table.css are portrait-only for the same reason.
+ */
+@media (orientation: landscape) and (max-height: 500px) {
+  #app { padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left)); }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) {
+    /* A fixed height, not flex: 1 — as a flex item of #app it would otherwise grow to its content. */
+    display: grid; flex: none; height: calc(100dvh - 12px); min-height: 0; gap: 0 8px;
+    grid-template-columns: minmax(0, 1fr) clamp(220px, 38%, 340px);
+    /* The status row keeps room for the banner and its clock; cards and the buzzer sit below it. */
+    grid-template-rows: auto minmax(64px, 1fr) auto auto auto auto;
+  }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) > .topbar { grid-column: 1 / -1; min-height: 40px; }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) .stage-layout { display: contents; }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) #game-stage {
+    grid-column: 1; grid-row: 2 / -1; min-height: 0; height: auto; margin-bottom: 4px;
+  }
+  /* Status and scoreboard scroll inside their cell when many players sit at the table. */
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) .host-col {
+    grid-column: 2; grid-row: 2; min-height: 0; overflow-y: auto; gap: 6px;
+    display: flex; flex-direction: column;
+  }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) > .dock > *,
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) > #connection-status,
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) > .host-banner { grid-column: 2; margin-top: 6px; }
+  #host-seat { display: none; }
+  .host-col .players .player:not(.role-spectator) { padding-top: 4px; padding-bottom: 4px; }
+  .host-col .players .player:not(.role-spectator) .avatar { width: 32px; height: 32px; }
+  .stage-banner { padding: 8px 10px; }
+  .stage-subtitle { font-size: var(--t-xs); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .buzzer { position: static; min-height: 64px; }
+  #host-controls { position: static; }
+  /*
+   * While you act on a card (bid, wager, written answer) it takes the scoreboard's place in the right
+   * column; the table keeps the whole left column, so the question stays readable while you type.
+   */
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]):has(.dock > .card:not(.hidden)) .host-col .players,
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]):has(.dock > .card:not(.hidden)) .stage-subtitle { display: none; }
+  #screen-game:not([data-phase="lobby"]):not([data-phase="gameOver"]) > .dock > .card {
+    max-height: calc(100dvh - 128px); min-height: 0; overflow-y: auto; padding: 8px 10px; gap: 6px;
+  }
+  /* The banner already names the step, so the card's own heading goes. */
+  #screen-game > .dock > .card > h3 { display: none; }
+  #stake-auction-status { font-size: var(--t-s); }
+  /* The input keeps its label for screen readers; the hint under the buttons says what to bid. */
+  #stake-bid-form .field > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #stake-bid-form, #final-wager { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; }
+  #stake-bid-form .field, #final-wager .field { flex: 1 1 120px; }
+  /* Answer boxes: label and box full width, the status beside the Submit button. */
+  #final-answer, #typed-answer-form, #for-all-answer-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+  #final-answer > label, #typed-answer-form > label, #for-all-answer-form > label,
+  #final-answer textarea, #typed-answer-form textarea, #for-all-answer-form textarea { grid-column: 1 / -1; }
+  #final-answer textarea, #typed-answer-form textarea, #for-all-answer-form textarea { min-height: 0; height: 40px; }
+  #final-answer > button, #typed-answer-form > button, #for-all-answer-form > button { grid-column: 2; grid-row: 3; }
+  #final-answer-status { grid-column: 1; grid-row: 3; }
+  /* One-row top bar: the logo and your name give way to round, score and the controls. */
+  #screen-game:not([data-phase="lobby"]) .brand, #screen-game:not([data-phase="lobby"]) .host-chip,
+  #screen-game:not([data-phase="lobby"]) .me-chip .me-name { display: none; }
+  .topbar { gap: 8px; }
+  #btn-leave .label { display: none; }
+}

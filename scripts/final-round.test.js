@@ -133,13 +133,14 @@ test('unavailable final themes are excluded from elimination and repeat play', (
   assert.equal(room.engine.isAvailable(1, 0), false);
 });
 
-test('final theme elimination stops when the round deadline has passed', (t) => {
+test('final theme elimination has no round deadline', (t) => {
   const { room, host } = finalGame(t);
   const engine = room.engine;
-  engine.roundEndsAt = Date.now() - 1;
-  assert.throws(() => engine.removeFinalTheme(host.id, true, 0), /round has ended/);
-  assert.equal(engine.phase, 'roundEnd');
-  assert.deepEqual([...engine.removedFinalThemes], []);
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  Date.now = () => realNow() + 3 * 60 * 60 * 1000;
+  engine.removeFinalTheme(host.id, true, 0);
+  assert.deepEqual([...engine.removedFinalThemes], [0]);
 });
 
 test('a removed finalist cannot block the reveal', (t) => {
@@ -149,8 +150,8 @@ test('a removed finalist cannot block the reveal', (t) => {
   engine.removeFinalTheme(host.id, true, 1);
   engine.setFinalWager(player.id, 200);
   engine.openFinal();
+  // Nobody is left to answer or judge, so the final closes and reveals by itself.
   room.remove(player.id);
-  engine.closeFinal();
   assert.equal(engine.phase, 'reveal');
 });
 
@@ -198,4 +199,22 @@ test('a recovered moderator can see wagers for judging without seeing the answer
   assert.equal(room.canModerate(player.id), true);
   assert.deepEqual(room.snapshotFor(player.id).game.final.wagers, { [player.id]: 200 });
   assert.equal(room.snapshotFor(player.id).game.current.right, null);
+});
+
+test('podiums can mark who saved a final wager, also while paused, without the amount', (t) => {
+  const { room, host, player } = finalGame(t, false);
+  const engine = room.engine;
+  engine.removeFinalTheme(host.id, true, 0);
+  engine.removeFinalTheme(host.id, true, 1);
+  assert.equal(engine.phase, 'finalWager');
+  const view = () => room.snapshotFor(host.id).game.final;
+  assert.deepEqual(view().eligibleIds, [player.id]);
+  assert.deepEqual(view().wagered, []);
+  // A finalist without a wager stays listed during a pause, so the "no wager yet" mark survives it.
+  engine.pause();
+  assert.deepEqual(view().eligibleIds, [player.id]);
+  engine.resume();
+  engine.setFinalWager(player.id, 200);
+  assert.deepEqual(view().wagered, [player.id]);
+  assert.equal(view().wagers, null, 'the amount stays private');
 });

@@ -78,7 +78,7 @@ app.get('/api/invite.svg', (req: Request, res: Response) => {
 
 /** Hosts and room owners may add a pack without exposing an unfinished archive to players. */
 app.post('/api/packs/upload', async (req, res) => {
-  if (!canUpload(room, req.headers.authorization)) return res.status(403).json({ error: 'Only a connected host or owner may upload packs' });
+  if (!canUpload(room, req.headers.authorization)) return res.status(403).json({ error: 'Only a connected host may upload packs' });
   if (!req.is('application/octet-stream')) return res.status(415).json({ error: 'Upload a .siq file as application/octet-stream' });
   if (Number(req.headers['content-length']) > MAX_UPLOAD_BYTES) return res.status(413).json({ error: 'Pack exceeds the 200 MB limit' });
   try {

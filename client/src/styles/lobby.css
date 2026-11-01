@@ -60,6 +60,8 @@
 .setting-toggle small { display: block; color: var(--mist); font-weight: 600; }
 /* A brief mark after the room accepts a change; settings otherwise save without any sign. */
 .field.saved > span:first-child::after, .setting-toggle.saved strong::after { content: " · Saved"; color: var(--ok-hover); }
+/* CSS text follows the page language that i18n.ts sets on <html>. */
+:root:lang(uk) .field.saved > span:first-child::after, :root:lang(uk) .setting-toggle.saved strong::after { content: " · Збережено"; }
 
 
 @media (max-width: 860px) {
@@ -80,6 +82,17 @@
 #results-list li { display: grid; grid-template-columns: 28px auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 14px; border-radius: var(--r-control); background: var(--set-sunk); counter-increment: rank; }
 #results-list li::before { content: counter(rank); color: var(--mist); font: 700 var(--t-s) var(--font-display); }
 #results-list .name { font-weight: 800; overflow-wrap: anywhere; }
+/* Small phones: tighter rows give names room to break between words, not mid-word (playtest F12). */
+@media (max-width: 420px) {
+  #results-list li { grid-template-columns: 20px auto minmax(0, 1fr) auto; gap: 8px; padding: 8px 10px; }
+  #results-list .pts { font-size: var(--t-m); }
+  #results-list .name { overflow-wrap: break-word; hyphens: auto; }
+}
+/* The narrowest phones drop the avatar: the name needs the width more than the initials do. */
+@media (max-width: 360px) {
+  #results-list li { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  #results-list li .avatar { display: none; }
+}
 #results-list .pts { color: var(--lamp); font: 600 var(--t-l) var(--font-display); font-variant-numeric: tabular-nums; }
 #results-list li.winner { background: var(--lamp); color: var(--on-lamp); }
 #results-list li.winner::before, #results-list li.winner .pts { color: var(--on-lamp); }

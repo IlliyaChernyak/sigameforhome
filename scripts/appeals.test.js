@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-appeals-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -27,7 +28,7 @@ function game(t, type = 'simple') {
   const pack = structuredClone(loaded.pack);
   pack.rounds[0].themes[0].questions[0].type = type;
   room.setPack({ ...loaded, pack });
-  room.updateSettings(host.id, { gameMode: 'classic', timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { ...INSTANT_BUZZER, gameMode: 'classic', timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   room.engine.start();
   room.engine.selectQuestion(host.id, true, 0, 0);
   t.after(() => {
@@ -77,6 +78,47 @@ test('accepted rejection appeal reverses later attempts and returns chooser to a
   assert.equal(bob.score, 0);
   assert.equal(engine.chooserId, engine.current.chooserBeforeQuestion);
   assert.equal(room.snapshotFor(host.id).game.appeals.active, null);
+});
+
+// The appeal clock replaces the reveal clock. Builds that did not restart it left the room on the
+// answer after every appeal, waiting for the host ("appeal freezes the game").
+test('a resolved appeal closes the question on its own, however the vote ends', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const { players: [alice, bob, cara, dan], engine } = game(t);
+  const backToBoard = () => {
+    assert.equal(engine.phase, 'reveal');
+    assert.equal(engine.timer?.name, 'reveal', 'the reveal clock runs again after the vote');
+    t.mock.timers.tick(engine.timer.durationMs);
+    assert.equal(engine.phase, 'board');
+  };
+
+  // Every eligible player votes.
+  answer(engine, alice, false);
+  answer(engine, bob, true);
+  engine.requestAppeal(alice.id, 1);
+  engine.voteAppeal(bob.id, false);
+  engine.voteAppeal(cara.id, false);
+  engine.voteAppeal(dan.id, false);
+  backToBoard();
+
+  // The host closes the vote (game:appealClose).
+  engine.selectQuestion(alice.id, true, 0, 1);
+  answer(engine, alice, false);
+  answer(engine, bob, true);
+  engine.requestAppeal(alice.id, 1);
+  engine.resolveAppeal();
+  backToBoard();
+
+  // Nobody votes and the appeal clock runs out, across a pause.
+  engine.selectQuestion(alice.id, true, 1, 0);
+  answer(engine, alice, false);
+  answer(engine, bob, true);
+  engine.requestAppeal(alice.id, 1);
+  engine.pause();
+  engine.resume();
+  assert.equal(engine.timer?.name, 'appeal');
+  t.mock.timers.tick(engine.timer.durationMs);
+  backToBoard();
 });
 
 test('acceptance challenge requires four players; ties reject; accepted challenge reverses score', (t) => {

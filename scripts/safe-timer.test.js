@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, mock, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-safe-timer-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -46,7 +47,7 @@ test('a throw inside the buzz window grant leaves the engine usable', async (t) 
   const player = room.join('Player').participant;
   room.attach(player.id, 'player-socket');
   room.setPack(loaded);
-  room.updateSettings(host.id, { timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { ...INSTANT_BUZZER, timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   room.engine.start();
   room.engine.selectQuestion(host.id, true, 0, 0);
   room.engine.openBuzzer();

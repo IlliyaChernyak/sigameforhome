@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-socket-binding-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -33,6 +34,7 @@ class FakeSocket extends EventEmitter {
 test('room size bounds spectators as well as player seats', () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   for (let index = 0; index < MAX_ROOM_PARTICIPANTS; index++) room.join(`Guest ${index}`);
   assert.throws(() => room.join('One too many'), /room is full/);
   room.remove([...room.participants.keys()][0]);
@@ -42,6 +44,7 @@ test('room size bounds spectators as well as player seats', () => {
 test('manual score changes retain safe whole-number totals', () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   const host = room.join('Host').participant;
   room.attach(host.id, 'host-score');
   room.chooseInitialRole(host.id, 'host');
@@ -56,6 +59,7 @@ test('manual score changes retain safe whole-number totals', () => {
 test('new join attempts are throttled by source address while resume stays available', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -88,6 +92,8 @@ test('new join attempts are throttled by source address while resume stays avail
 test('typed answer socket event accepts only the winner and keeps text private', async (t) => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
+  Object.assign(room.settings, INSTANT_BUZZER);
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -131,6 +137,7 @@ test('typed answer socket event accepts only the winner and keeps text private',
 test('one socket cannot flood commands while clock sync stays available', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -158,6 +165,7 @@ test('one socket cannot flood commands while clock sync stays available', async 
 test('a repeated false start is ignored without extending its penalty', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -193,6 +201,7 @@ test('a repeated false start is ignored without extending its penalty', async ()
 test('a joined socket cannot switch seats and a replaced socket loses access', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -236,6 +245,7 @@ test('a joined socket cannot switch seats and a replaced socket loses access', a
 test('only the current moderator can finish media after host recovery', async (t) => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -291,6 +301,7 @@ test('only the current moderator can finish media after host recovery', async (t
 test('revoked manager cannot finish a pending pack load', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -316,6 +327,8 @@ test('revoked manager cannot finish a pending pack load', async () => {
 test('only the moderator can undo the current exact judgment', async (t) => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
+  Object.assign(room.settings, INSTANT_BUZZER);
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -359,6 +372,7 @@ test('only the moderator can undo the current exact judgment', async (t) => {
 test('verdict events reject non-boolean values', async () => {
   const room = new Room();
   room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
   let onConnection;
   const io = {
     sockets: { sockets: new Map() },
@@ -402,4 +416,103 @@ test('a buzz from a socket that has not joined is rejected, not replayed (audit 
   onConnection(socket);
   const reply = await new Promise((resolve) => socket.emit('game:buzz', {}, resolve));
   assert.deepEqual(reply, { ok: false, error: 'Join the game first' });
+});
+
+test('a stand-in host cannot rule on their own answer or score', async (t) => {
+  const room = new Room();
+  room.settings.timeForQuestionIntro = 0;
+  room.settings.timeForQuestionReady = 0;
+  Object.assign(room.settings, INSTANT_BUZZER);
+  let onConnection;
+  const io = {
+    sockets: { sockets: new Map() },
+    on(event, callback) { if (event === 'connection') onConnection = callback; },
+    to() { return { emit() {} }; },
+  };
+  registerSocketHandlers(io, room);
+  const connect = (id) => {
+    const socket = new FakeSocket(id);
+    io.sockets.sockets.set(id, socket);
+    onConnection(socket);
+    return socket;
+  };
+  const send = (socket, event, payload = {}) =>
+    new Promise((resolve) => socket.emit(event, payload, resolve));
+  const hostSocket = connect('host');
+  const host = await send(hostSocket, 'session:join', { nickname: 'Host' });
+  await send(hostSocket, 'role:choose', { role: 'host' });
+  const aliceSocket = connect('alice');
+  const alice = await send(aliceSocket, 'session:join', { nickname: 'Alice' });
+  const bobSocket = connect('bob');
+  const bob = await send(bobSocket, 'session:join', { nickname: 'Bob' });
+  const aliceId = room.tokens.get(alice.token);
+  const bobId = room.tokens.get(bob.token);
+  const hostId = room.tokens.get(host.token);
+  room.setPack(await loadPack(packFile));
+  room.engine.start();
+  t.after(() => {
+    room.engine.reset();
+    for (const timer of room.removalTimers.values()) clearTimeout(timer);
+  });
+  room.engine.selectQuestion(room.ownerId, true, 0, 0);
+  room.engine.openBuzzer();
+  await send(aliceSocket, 'game:buzz', {});
+  assert.equal(room.engine.buzzer.winnerId, aliceId);
+
+  // The host drops mid-answer; after the wait the owner role reaches Alice, the answerer.
+  room.detach(hostId, hostSocket.id);
+  markHandoverReady(room, hostId);
+  assert.equal(room.canModerate(aliceId), true);
+  for (const [event, payload] of [['game:judge', { correct: true }], ['game:passAnswer', {}],
+    ['game:reveal', {}], ['game:next', {}], ['score:adjust', { targetId: aliceId, delta: 500 }],
+    ['game:judgeForAll', { playerId: aliceId, correct: true }], ['game:judgeFinal', { playerId: aliceId, correct: true }]]) {
+    assert.deepEqual(await send(aliceSocket, event, payload),
+      { ok: false, error: 'Someone else must rule on your own answer' }, `${event} must be refused`);
+  }
+  assert.equal(room.engine.phase, 'answering');
+  assert.equal(room.participants.get(aliceId).score, 0);
+  // Ruling on someone else's score is still a stand-in's job.
+  assert.equal((await send(aliceSocket, 'score:adjust', { targetId: bobId, delta: 100 })).ok, true);
+
+  // The returning host rules as usual.
+  const back = connect('host-back');
+  await send(back, 'session:resume', { token: host.token });
+  assert.equal((await send(back, 'game:judge', { correct: true })).ok, true);
+  assert.equal(room.participants.get(aliceId).score, room.engine.current.price);
+});
+
+test('clock probes record a round trip only for the joined socket of a seat', async () => {
+  const room = new Room();
+  let onConnection;
+  const io = {
+    sockets: { sockets: new Map() },
+    on(event, callback) { if (event === 'connection') onConnection = callback; },
+    to() { return { emit() {} }; },
+  };
+  registerSocketHandlers(io, room);
+  const connect = (id) => {
+    const socket = new FakeSocket(id);
+    io.sockets.sockets.set(id, socket);
+    onConnection(socket);
+    return socket;
+  };
+  const send = (socket, event, payload) => new Promise((resolve) => socket.emit(event, payload, resolve));
+  const unjoined = connect('clock-unjoined');
+  const probe = await send(unjoined, 'clock:ping', { rtt: 900 });
+  assert.equal(probe.ok, true);
+  assert.ok(Number.isFinite(probe.serverTime));
+
+  const hostSocket = connect('clock-host');
+  const hostJoin = await send(hostSocket, 'session:join', { nickname: 'Host' });
+  room.chooseInitialRole(hostJoin.you?.id ?? room.ownerId, 'host');
+  const playerSocket = connect('clock-player');
+  const joined = await send(playerSocket, 'session:join', { nickname: 'Player' });
+  assert.equal(joined.ok, true);
+  assert.equal(room.worstPlayerRttMs(), null, 'a probe before joining counts for nobody');
+  await send(playerSocket, 'clock:ping', { rtt: 240 });
+  assert.equal(room.worstPlayerRttMs(), 240);
+  // Junk payloads are answered and ignored.
+  assert.equal((await send(playerSocket, 'clock:ping', null)).ok, true);
+  assert.equal((await send(playerSocket, 'clock:ping', 'x')).ok, true);
+  assert.equal(room.worstPlayerRttMs(), 240);
 });

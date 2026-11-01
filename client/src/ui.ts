@@ -1,4 +1,5 @@
 /* Presentation helpers shared by the game screen: labels, avatars, toasts, and podium replics. */
+import { t } from './i18n';
 
 /** Non-blocking notice; errors stay longer because the user usually needs to act on them. */
 export function toast(message: string, tone: 'error' | 'info' = 'error') {
@@ -31,13 +32,13 @@ export function avatar(id: string, name: string): HTMLElement {
 }
 
 export const roleLabels: Record<string, string> = {
-  host: 'Host', player: 'Player', spectator: 'Watching', pending: 'Choosing a seat',
+  host: t('Host'), player: t('Player'), spectator: t('Watching'), pending: t('Choosing a seat'),
 };
 
 /** Pack question types in words a player understands. Simple questions need no label. */
 const questionTypeLabels: Record<string, string> = {
-  stake: 'Auction', noRisk: 'No risk', secret: 'Secret', secretPublicPrice: 'Secret',
-  secretNoQuestion: 'Gift', forAll: 'Everyone answers',
+  stake: t('Auction'), noRisk: t('No risk'), secret: t('Secret'), secretPublicPrice: t('Secret'),
+  secretNoQuestion: t('Gift'), forAll: t('Everyone answers'),
 };
 export const questionTypeLabel = (type: string): string => questionTypeLabels[type] ?? '';
 

@@ -7,7 +7,7 @@ if ! command -v node >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then
   . "$HOME/.nvm/nvm.sh"
 fi
 if ! command -v node >/dev/null 2>&1; then
-  echo 'Node.js 18.17+ or 20+ LTS is required. Install it from https://nodejs.org.' >&2
+  echo 'Node.js 20.19+ or 22.12+ is required. Install it from https://nodejs.org.' >&2
   exit 1
 fi
 exec node scripts/start.js

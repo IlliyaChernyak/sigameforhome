@@ -5,10 +5,16 @@ export interface Participant {
   score: number;
   connected: boolean;
   displayOnly: boolean;
+  ready: boolean;
   isOwner: boolean;
-  pingMs?: number | null;
-  oneWayMs?: number | null;
-  jitterMs?: number | null;
+  /** Live connection figures; null while offline or not yet measured. */
+  pingMs: number | null;
+  oneWayMs: number | null;
+  jitterMs: number | null;
+  /** How this screen met the last green signals (server/game/latencyBoard.ts); null until reported. */
+  signal: { leadMs: number; worstLeadMs: number; paintMs: number; clockErrMs: number } | null;
+  /** The buzzer no longer waits for this link: far laggier than the rest (ignoreLaggingLinks). */
+  lagging: boolean;
 }
 
 export interface ContentItem {
@@ -44,13 +50,18 @@ export interface RoomState {
     timeForThinkingOnQuestion: number;
     timeForPrintingAnswer: number;
     timeForMakingStake: number;
+    timeForChoosingQuestion: number;
+    timeForChoosingFinalTheme: number;
     timeForThinkingOnSpecial: number;
     timeForFinalThinking: number;
-    timeOfRound: number;
     timeForMediaDelay: number;
     timeForQuestionIntro: number;
+    timeForQuestionReady: number;
     buzzSyncMode: 'server' | 'clientTimestamp';
     buzzSyncWindowMs: number;
+    buzzOpenLeadMs: number;
+    paintCredit: boolean;
+    ignoreLaggingLinks: boolean;
     maxPlayers: number;
     [key: string]: string | number | boolean;
   };
@@ -79,7 +90,8 @@ export interface RoomState {
       type: string;
       assignedId: string | null;
       content: ContentItem[];
-      priceRange: { minimum: number; maximum: number; step: number } | null;
+      /** While a special question is set up: the values it may get (one fixed value, or min and max). */
+      priceOptions: number[] | null;
       answerShown: boolean;
       right: string[] | null;
       answerContent: ContentItem[] | null;
@@ -91,14 +103,15 @@ export interface RoomState {
       showmanComments: string | null;
       selectionMode: string | null;
       picks: { playerId: string; value: string; correct: boolean }[];
-      revealAt?: number | null;
-      readyPlayerIds?: string[];
+      /** Server time the question script (reading) or the answer (reveal) starts on every screen. */
+      mediaStartsAt: number | null;
     } | null;
     buzzer: {
-      openedAt?: number | null;
       winnerId: string | null;
       typedAnswer: { text: string | null; submitted: boolean; closed: boolean } | null;
       winnerInfo: { mode: 'server' | 'clientTimestamp' | 'random'; reactionMs: number; transitMs?: number; contenders?: number } | null;
+      /** Server time the buttons turn green; it can be a little in the future. */
+      openedAt: number | null;
       attempted: string[];
       blockedUntil: number | null;
       blockedPlayers: { id: string; until: number }[];
@@ -126,6 +139,7 @@ export interface RoomState {
       judged: string[];
       eligibleIds: string[];
       answeredIds: string[];
+      editingIds: string[];
       yourAnswer: string | null;
       answers: Record<string, string> | null;
     } | null;
@@ -161,27 +175,32 @@ export interface Ack {
 export type JoinAck = { ok: true; token: string } | { ok: false; error: string };
 
 export type NoPayloadCommand =
-  | 'session:leave' | 'packs:list' | 'game:start' | 'game:stop' | 'game:pause' | 'game:resume'
+  | 'session:leave' | 'packs:list' | 'game:start' | 'game:restart' | 'game:stop' | 'game:pause' | 'game:resume'
   | 'game:openFinal' | 'game:closeFinal' | 'game:openBuzzer'
   | 'game:reveal' | 'game:next' | 'game:prevRound' | 'game:nextRound' | 'game:stakePass' | 'game:closeForAll'
-  | 'game:appealClose';
+  | 'game:appealClose' | 'game:passAnswer';
 
 export interface CommandPayloads {
   'game:undoJudgment': { presentationId: string; judgmentId: number };
   'game:answer': { answer: string };
   'participant:kick': { targetId: string };
   'participant:rename': { targetId: string; name: string };
+  'player:ready': { ready: boolean };
   'role:choose': { role: 'host' | 'player' };
   'role:set': { targetId: string; role: 'host' | 'player' | 'spectator' };
   'score:adjust': { targetId: string; delta: number };
+  'score:set': { targetId: string; score: number };
   'packs:load': { file: string };
   'settings:update': Partial<RoomState['settings']>;
   'steam:download': { link: string };
   'game:select': { themeIndex: number; questionIndex: number };
   'game:removeFinalTheme': { themeIndex: number };
-  'game:configureSpecial': { playerId: string; price: number };
+  'game:configureSpecial': { playerId: string };
+  'game:specialPrice': { price: number };
   'game:finalWager': { amount: number };
   'game:finalAnswer': { answer: string };
+  'game:draft': { text: string };
+  'seat:give': { seatId: string; newcomerId: string };
   'game:judgeFinal': { playerId: string; correct: boolean };
   'game:judge': { correct: boolean; factor?: number };
   'game:stakeBid': { amount: number; allIn: boolean };
@@ -189,8 +208,7 @@ export interface CommandPayloads {
   'game:judgeForAll': { playerId: string; correct: boolean };
   'game:appealRequest': { judgmentId: number };
   'game:appealVote': { support: boolean };
-  'game:contentFinished': { presentationId: string };
-  'game:questionReady': { presentationId: string };
+  'game:contentFinished': { presentationId: string; part?: 'answer' };
 }
 
 export type CommandEvent = NoPayloadCommand | keyof CommandPayloads;
@@ -199,11 +217,12 @@ export type CommandEvent = NoPayloadCommand | keyof CommandPayloads;
 export type GameEvent =
   | { type: 'answerJudged'; correct: boolean; playerId?: string | null; delta?: number }
   | { type: 'buzzAccepted'; playerId: string; assigned?: boolean }
-  | { type: 'falseStart' | 'stakePass'; playerId: string }
+  | { type: 'falseStart' | 'stakePass' | 'answerPassed'; playerId: string }
   | { type: 'stakeBid'; playerId: string; amount: number; allIn: boolean }
   | { type: 'stakeWon'; playerId: string; amount: number }
   | { type: 'giftAwarded'; playerId: string; price: number }
-  | { type: 'buzzerOpen' | 'specialSetup' | 'questionSelected' | 'roundEnd' };
+  | { type: 'buzzerOpen'; openedAt: number }
+  | { type: 'specialSetup' | 'questionSelected' | 'roundEnd' };
 
 export interface SteamProgress {
   stage: string;
@@ -226,6 +245,7 @@ export type ClientToServerEvents = {
 } & {
   'session:join': (payload: { nickname: string; asSpectator?: boolean }, ack: (result: JoinAck) => void) => void;
   'session:resume': (payload: { token: string }, ack: (result: { ok: boolean; resumed?: boolean }) => void) => void;
-  'game:buzz': (payload: { clientAt: number }, ack: (result: Ack) => void) => void;
-  'clock:ping': (payload: { rttMs?: number }, ack: (result: { ok: boolean; serverTime: number; maxPingMs?: number }) => void) => void;
+  'game:buzz': (payload: { clientAt: number; paintMs?: number }, ack: (result: Ack) => void) => void;
+  'clock:ping': (payload: { rtt?: number }, ack: (result: { ok: boolean; serverTime: number }) => void) => void;
+  'clock:signal': (payload: { at: number; leadMs: number; paintMs: number; clockErrMs: number; readyMs?: number }) => void;
 };

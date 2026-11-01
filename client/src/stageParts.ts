@@ -3,6 +3,7 @@
  * picture pins and the target ring, option tiles, text that shrinks to fit, and the audio cue.
  * They only build DOM; game state and sockets stay in app.ts.
  */
+import { t } from './i18n';
 import type { ContentItem } from './types';
 
 export interface Pin {
@@ -33,6 +34,47 @@ export function imageFrame(url: string): HTMLElement {
   if (img.complete) measure();
   frame.append(img);
   return frame;
+}
+
+/*
+ * A picture on the table is only as wide as the card, so small print in it (a list of countries,
+ * numbered flags) is hard to read. Any viewer can open it at window size; any tap closes it again,
+ * because the game may need the player back at once.
+ */
+let zoomView: HTMLDialogElement | null = null;
+
+function openZoom(url: string): void {
+  if (!zoomView) {
+    zoomView = Object.assign(document.createElement('dialog'), { className: 'zoom-view' });
+    zoomView.setAttribute('aria-label', t('Enlarged picture'));
+    zoomView.addEventListener('click', () => zoomView?.close());
+    document.body.append(zoomView);
+  }
+  const view = zoomView;
+  const img = Object.assign(document.createElement('img'), { src: url, alt: '', draggable: false });
+  // CSS turns a wide picture sideways on an upright phone, where it would otherwise stay card-sized.
+  const markWide = () => view.classList.toggle('wide', img.naturalWidth > img.naturalHeight);
+  view.classList.remove('wide');
+  img.addEventListener('load', markWide);
+  if (img.complete) markWide();
+  view.replaceChildren(img);
+  if (!view.open) view.showModal();
+}
+
+/** The question moved on, so its enlarged picture would be stale. */
+export function closeZoom(): void {
+  zoomView?.close();
+}
+
+/** Adds an enlarge button; a tap on the picture enlarges it too, unless that tap is a point answer. */
+export function makeZoomable(frame: HTMLElement, url: string): void {
+  const button = Object.assign(document.createElement('button'), { type: 'button', className: 'zoom-btn icon-only', title: t('Enlarge picture') });
+  button.dataset.icon = 'expand';
+  button.append(Object.assign(document.createElement('span'), { className: 'label', textContent: t('Enlarge picture') }));
+  // Stop here, or the same tap would also count as a pick on a point question.
+  button.addEventListener('click', (event) => { event.stopPropagation(); openZoom(url); });
+  frame.addEventListener('click', () => { if (!frame.classList.contains('pickable')) openZoom(url); });
+  frame.append(button);
 }
 
 /** Blurred copy of the picture behind it, so letterbox bars read as part of the image. */
@@ -66,7 +108,7 @@ export function drawRing(frame: HTMLElement, target: { x: number; y: number }, d
 export function makePickable(frame: HTMLElement, onPick: (point: { x: number; y: number }) => void): void {
   frame.classList.add('pickable');
   frame.setAttribute('role', 'button');
-  frame.setAttribute('aria-label', 'Tap the picture where the answer is');
+  frame.setAttribute('aria-label', t('Tap the picture where the answer is'));
   frame.addEventListener('click', (event) => {
     const box = frame.getBoundingClientRect();
     if (!box.width || !box.height) return;
@@ -86,9 +128,11 @@ export function optionTiles(options: OptionState[], onChoose: ((label: string) =
   const row = document.createElement('div');
   row.className = 'q-options';
   row.style.setProperty('--count', String(options.length));
-  for (const option of options) {
+  options.forEach((option, index) => {
     const tile = document.createElement(onChoose ? 'button' : 'div');
     tile.className = `option ${option.state}`;
+    // Its place in the queue when the options arrive one by one.
+    tile.style.setProperty('--i', String(index));
     if (tile instanceof HTMLButtonElement) {
       tile.type = 'button';
       tile.onclick = () => onChoose?.(option.label);
@@ -101,7 +145,7 @@ export function optionTiles(options: OptionState[], onChoose: ((label: string) =
     }
     tile.append(body);
     row.append(tile);
-  }
+  });
   return row;
 }
 
@@ -134,26 +178,18 @@ export function fitText(box: HTMLElement, minPx = 16): void {
   }
 }
 
-/** Audio has no picture, so a level meter shows it is playing; a tap starts blocked playback. */
-export function audioCue(media: () => HTMLMediaElement[]): HTMLButtonElement {
-  const cue = Object.assign(document.createElement('button'), { type: 'button', className: 'audio-cue' });
+/**
+ * Audio has no picture, so a level meter shows it is playing. It is only a picture, never a control:
+ * a clip the browser kept silent gets its sound on the player's next touch anywhere (see soundGate).
+ */
+export function audioCue(media: () => HTMLMediaElement[]): HTMLDivElement {
+  const cue = Object.assign(document.createElement('div'), { className: 'audio-cue' });
+  cue.setAttribute('aria-hidden', 'true');
   const bars = Object.assign(document.createElement('span'), { className: 'bars' });
-  bars.setAttribute('aria-hidden', 'true');
   for (let i = 0; i < 5; i++) bars.append(document.createElement('i'));
-  const label = document.createElement('span');
-  cue.append(bars, label);
+  cue.append(bars);
   const sync = () => {
-    const playing = media().some((item) => !item.paused && !item.ended);
-    cue.classList.toggle('playing', playing);
-    // A muted clip still plays here when the room's sound comes from the host or TV screen.
-    const muted = media().some((item) => item.muted);
-    label.textContent = playing ? (muted ? 'Listen to the host screen' : 'Listen') : 'Tap to play the sound';
-    // While sound plays the meter is just a picture; it is a control only when playback was blocked.
-    cue.tabIndex = playing ? -1 : 0;
-    cue.setAttribute('aria-disabled', String(playing));
-  };
-  cue.onclick = () => {
-    for (const item of media()) if (item.paused && !item.ended) item.play().catch(() => {});
+    cue.classList.toggle('playing', media().some((item) => !item.paused && !item.ended));
   };
   for (const item of media()) {
     for (const type of ['play', 'pause', 'ended', 'playing']) item.addEventListener(type, sync);

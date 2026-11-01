@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { INSTANT_BUZZER } from './test-settings.ts';
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'sigame-stakes-'));
 process.env.PACKS_DIR = path.join(root, 'packs');
@@ -27,7 +28,7 @@ function table(t, scores) {
     return player;
   });
   room.setPack({ ...pack, pack: structuredClone(pack.pack) });
-  room.updateSettings(host.id, { gameMode: 'classic', timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { ...INSTANT_BUZZER, gameMode: 'classic', timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   room.engine.start();
   scores.forEach((score, index) => { players[index].score = score; });
   t.after(() => {
@@ -120,17 +121,38 @@ test('a disconnected high bidder cannot be assigned the answer', (t) => {
   assert.equal(a.score, 600);
 });
 
-test('a disconnected current bidder yields the stake turn immediately', (t) => {
+test('a dropped bidder keeps the turn for a short grace, then it moves on', (t) => {
+  // Device playtest F16: a refresh used to skip the bidder at once and could burn the question.
   const { room, host, players: [a, b, c] } = table(t, [600, 700, 800]);
   room.engine.chooserId = a.id;
   room.engine.selectQuestion(host.id, true, 0, 4);
-  assert.equal(room.engine.auctionTurnId(), a.id);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   room.detach(a.id, 'player-0');
-  assert.equal(room.engine.auctionTurnId(), b.id);
+  assert.equal(room.engine.auctionTurnId(), a.id, 'the turn waits for a reconnect');
+  assert.ok(room.engine.timer.endsAt - Date.now() <= 10_000);
+  t.mock.timers.tick(10_000);
+  assert.equal(room.engine.auctionTurnId(), b.id, 'still offline: the next bidder is up');
+  assert.equal(room.engine.auction.passed.has(a.id), false, 'skipped, not passed');
   room.engine.passStake(b.id);
   room.engine.passStake(c.id);
   assert.equal(room.engine.phase, 'reveal');
   assert.equal(room.engine.current.assignedId, null);
+});
+
+test('a bidder back within the grace keeps the turn with a fresh bid clock', (t) => {
+  const { room, host, players: [a, b] } = table(t, [600, 700]);
+  room.engine.chooserId = a.id;
+  room.engine.selectQuestion(host.id, true, 0, 4);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  room.detach(a.id, 'player-0');
+  t.mock.timers.tick(4_000);
+  room.attach(a.id, 'player-0b');
+  assert.equal(room.engine.auctionTurnId(), a.id);
+  assert.equal(room.engine.timer.endsAt - Date.now(), room.settings.timeForMakingStake * 1000);
+  t.mock.timers.tick(10_000);
+  assert.equal(room.engine.auctionTurnId(), a.id, 'the old grace no longer moves the turn');
+  room.engine.bidStake(a.id, 500);
+  assert.equal(room.engine.auctionTurnId(), b.id);
 });
 
 test('resuming an auction skips a bidder who left during the pause', (t) => {

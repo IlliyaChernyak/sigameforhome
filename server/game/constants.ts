@@ -29,6 +29,11 @@ export const PHASES = Object.freeze({
    * inside READING) so every action that accepts READING refuses it by default and no content leaks.
    */
   INTRO: 'intro',
+  /**
+   * The question is on screen with a get-ready countdown before reading starts. Presses are ignored,
+   * not punished, so players can read ahead and settle on their buttons.
+   */
+  READY: 'ready',
   /** Question content is being shown/read. Pressing now = false start. */
   READING: 'reading',
   /** Buzzers are live. */

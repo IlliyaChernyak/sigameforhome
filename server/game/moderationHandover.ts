@@ -38,6 +38,10 @@ export function markHandoverReady(room: Room, hostId: string): void {
   const handover = handovers.get(room);
   if (handover?.hostId !== hostId) return;
   handover.ready = true;
+  // The first joiner usually picks Host, so the absent host is often the owner too. The owner
+  // stands in for the host, so keeping ownership with them for the whole reconnect grace left
+  // nobody able to moderate or reassign the host seat. A returning host keeps host rights anyway.
+  if (room.ownerId === hostId) room.reassignOwner();
   room.changed();
 }
 

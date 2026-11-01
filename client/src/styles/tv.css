@@ -2,7 +2,7 @@
 .tv-mode #manage, .tv-mode #host-controls, .tv-mode #buzzer, .tv-mode .q-host, .tv-mode #typed-answer,
 .tv-mode #special-setup, .tv-mode #stake-bid-form, .tv-mode #for-all-answer-form, .tv-mode #for-all-host,
 .tv-mode #final-wager, .tv-mode #final-answer, .tv-mode #final-host, .tv-mode .round-arrow, .tv-mode #host-tools, .tv-mode #btn-leave, .tv-mode .player-menu,
-.tv-mode #appeal-vote-actions, .tv-mode #appeal-judgments button { display: none !important; }
+.tv-mode #appeal-vote-actions, .tv-mode #appeal-judgments button, .tv-mode .zoom-btn { display: none !important; }
 .tv-mode #app { max-width: none; padding: 2vw; }
 .tv-mode .topbar { font-size: clamp(18px, 1.6vw, 32px); }
 .tv-mode .brand { font-size: clamp(24px, 2.2vw, 44px); }

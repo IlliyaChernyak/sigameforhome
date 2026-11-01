@@ -12,6 +12,7 @@
  *
  * The socket is injected so this module can be tested without a browser.
  */
+import { t } from './i18n';
 
 const WAKE_PROBE_MIN_HIDDEN_MS = 5000;
 export const PROBE_TIMEOUT_MS = 2000;
@@ -30,8 +31,8 @@ export interface MonitoredSocket {
 }
 
 export const noticeText: Record<Exclude<ConnectionNotice, 'none'>, string> = {
-  otherTab: 'This seat is open on another tab or device.',
-  unreachable: 'Can’t reach the game server. Check you’re on the host’s Wi-Fi.',
+  otherTab: t('This seat is open on another tab or device.'),
+  unreachable: t('Can’t reach the game server. Check you’re on the host’s Wi-Fi.'),
 };
 
 export function createConnectionMonitor(socket: MonitoredSocket, options: {

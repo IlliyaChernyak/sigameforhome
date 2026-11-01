@@ -14,8 +14,10 @@ const commandSuffix = process.platform === 'win32' ? '.cmd' : '';
 const buildTools = ['vite', 'tsc', 'tsx'].map((name) => path.join(modules, '.bin', `${name}${commandSuffix}`));
 
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
-if (nodeMajor < 18 || (nodeMajor === 18 && nodeMinor < 17)) {
-  console.error('Node.js 18.17+ (or 20+ LTS) is required. Install it from https://nodejs.org.');
+// Vite 8 needs Node ^20.19.0 || >=22.12.0 to build the client.
+const supported = (nodeMajor === 20 && nodeMinor >= 19) || (nodeMajor === 22 && nodeMinor >= 12) || nodeMajor > 22;
+if (!supported) {
+  console.error('Node.js 20.19+ or 22.12+ is required. Install it from https://nodejs.org.');
   process.exit(1);
 }
 

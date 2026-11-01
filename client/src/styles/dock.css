@@ -32,6 +32,11 @@
 #stake-bid-form .field { flex: 1 1 160px; }
 #final-wager { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
 #final-wager .field { flex: 1 1 200px; }
+/* The main action spans the row, so it reads as the form's submit rather than a twin of All in. */
+#final-wager-submit { flex: 1 1 auto; }
+/* The slider takes its own full-width row under the field and buttons; taller for thumbs on phones. */
+#stake-bid-form .amount-slider, #final-wager .amount-slider { flex: 1 1 100%; width: 100%; height: 32px; }
+.amount-slider:disabled { opacity: .4; cursor: default; }
 /* Step controls (special setup, final) are groups inside the host bar, not extra panels. */
 .bar-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .bar-group .field { flex-direction: row; align-items: center; gap: 8px; }
@@ -79,7 +84,7 @@
 /* "Wait" is neutral: nothing to press yet, so it must not look like a lit lamp. */
 .buzzer.buzz-reading { background: var(--set-raised); color: var(--mist); box-shadow: inset 0 0 0 2px var(--rule-strong); }
 .buzzer.buzz-open { background: var(--go); color: var(--on-go); }
-.buzzer.buzz-open:not(:disabled):hover { background: var(--go-hover); }
+@media (hover: hover) and (pointer: fine) { .buzzer.buzz-open:not(:disabled):hover { background: var(--go-hover); } }
 /* A press gets visible confirmation; offline or unconfirmed presses say so (audit UX-3). */
 .buzzer.sent { box-shadow: inset 0 0 0 4px var(--paper); }
 .buzzer.not-sent { box-shadow: inset 0 0 0 4px var(--stop); }
@@ -97,8 +102,11 @@
   .stage-progress-track { flex-basis: 100%; height: 4px; }
 }
 @media (max-width: 600px) {
-  /* One line on phones: the buzzer already states the pressing rule in full. */
-  .stage-subtitle { font-size: var(--t-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /*
+   * At most two lines on phones. One line cut the part that mattered ("Time is up. Waiting for a
+   * question to…", device playtest F6); two lines fit every banner text at 320 px.
+   */
+  .stage-subtitle { font-size: var(--t-xs); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   #host-controls { padding: 8px; gap: 6px; }
   #host-controls > button { flex: 1 1 auto; }
   #host-controls > button[data-act="judge-ok"], #host-controls > button[data-act="judge-bad"] { min-width: 0; flex: 1 1 40%; }
@@ -106,7 +114,7 @@
   .buzzer { min-height: 96px; }
   #buzzer-main { font-size: var(--t-l); }
   #stake-bid-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  #stake-bid-form .field { grid-column: 1 / -1; }
+  #stake-bid-form .field, #stake-bid-form .amount-slider { grid-column: 1 / -1; }
   .for-all-response { grid-template-columns: 1fr 1fr; }
   .for-all-response p { grid-column: 1 / -1; }
 }

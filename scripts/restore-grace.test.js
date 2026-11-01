@@ -47,7 +47,7 @@ function createRoom(t, { start = true } = {}) {
   room.attach(spectator.id, 'spectator-socket');
   room.setRole(spectator.id, spectator.id, 'spectator');
   room.setPack(loaded);
-  room.updateSettings(host.id, { timeForQuestionIntro: 0 });
+  room.updateSettings(host.id, { timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   if (start) room.engine.start();
   return { room, host, player, spectator };
 }
@@ -110,7 +110,7 @@ test("(c') after a missing-pack restore the owner can replace the ghost host and
   const Q = room.join('Q').participant;
   room.attach(Q.id, 'q-socket');
   room.setPack(loaded);
-  room.updateSettings(H.id, { timeForQuestionIntro: 0 });
+  room.updateSettings(H.id, { timeForQuestionIntro: 0, timeForQuestionReady: 0 });
   room.engine.start();
   assert.equal(room.ownerId, P.id);
 
